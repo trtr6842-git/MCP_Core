@@ -1,0 +1,1 @@
+# kicad_mcp package

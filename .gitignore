@@ -179,3 +179,14 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# === KiCad MCP Server ===
+# Tool call logs
+logs/*.jsonl
+logs/*.log
+
+# Local doc clones (large, fetch separately)
+docs_cache/
+
+# MCP server runtime
+*.pid
