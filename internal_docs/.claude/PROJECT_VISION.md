@@ -62,6 +62,9 @@ Claude can copy it directly. Pipe filters (`grep`, `head`, `tail`, `wc`)
 let Claude refine results in a single call instead of making multiple
 round trips.
 
+Semantic search is the default. `--keyword` flag forces exact substring
+matching when needed.
+
 Log everything. The logs matter more than the tool design right now — a
 future analysis pass will tell us what commands engineers actually use and
 how they compose them.
@@ -107,39 +110,160 @@ Total corpus: 578 sections across 9 guides on the 9.0 branch.
 ## Semantic search
 
 Day zero ships with keyword search (case-insensitive substring matching).
-Day 0.5 adds semantic search via embeddings.
+Phase 2 adds two-stage semantic search: embedding retrieval + cross-encoder
+reranking.
 
-**Embedding provider must be swappable.** Define an `Embedder` protocol
-(callable: list of strings → list of vectors). Implementations:
-- Day 0.5: `fastembed` with `nomic-ai/nomic-embed-text-v1.5` (CPU, ONNX,
-  8192-token context, 768 dimensions, Matryoshka support)
-- Future: HTTP client calling a local GPU server endpoint
-- Future: Cloud embedding API (OpenAI, Cohere, etc.)
+### Search pipeline
 
-**Model selection rationale:** nomic-embed-text-v1.5 was chosen over
-bge-large-en-v1.5 because its 8K context window avoids chunking complexity
-(most sections fit whole), and it has competitive retrieval quality. The
-Matryoshka dimension flexibility (768 → 256) is a bonus for future storage
-optimization.
+Two-stage retrieve-then-rerank:
 
-**Chunking strategy:** Navigation (list/read) stays heading-based — the
-AsciiDoc heading structure is the browsing interface. Search gets a
-separate `Chunker` protocol for retrieval units. The initial
-`HeadingChunker` produces chunks aligned with sections (same as today),
-but the abstraction supports future strategies (sliding windows, semantic
-splitting) without changing the navigation layer. Chunks carry a
-`section_path` back-reference so search results link to navigable sections.
+1. **Retrieve** — embed query, cosine similarity against VectorIndex, pull
+   top-N candidates (N=20–50)
+2. **Rerank** — feed (query, candidate_text) pairs through a cross-encoder,
+   re-score, return top-K results (K=5–10)
 
-**Embedding cache:** Pre-computed vectors saved as files (numpy `.npy` +
-metadata JSON), keyed by model name + corpus hash. Invalidates automatically
-when the model or corpus changes. Speeds up dev restarts without adding a
-database dependency.
+The retriever does fast approximate recall over the full corpus. The reranker
+does expensive precise ranking on the shortlist. For Altium-to-KiCad
+terminology mapping ("copper pour" → "filled zone"), a cross-encoder that
+sees query and document together dramatically outperforms embedding
+similarity alone.
 
-**Quality over speed tradeoff:** The server sees <20 concurrent users and
-low request volume. Happily trade an order of magnitude in speed for 2x
-better retrieval quality. Startup cost (30s to embed 500 sections) is
-acceptable. Query latency up to 200ms is invisible next to Claude's
+### Model choices
+
+**Embedding model:** `Qwen/Qwen3-Embedding-0.6B` (0.6B params, 32K context,
+up to 1024 dimensions, MRL/Matryoshka support, instruction-aware). Chosen
+over nomic-embed-text-v1.5 for its 4× longer context (32K vs 8K),
+instruction-aware queries (1–5% retrieval boost with task-specific prefixes),
+and stronger MTEB scores.
+
+**Reranker model:** `cross-encoder/ms-marco-MiniLM-L-6-v2` (22MB, MiniLM
+6-layer cross-encoder, fine-tuned on MS MARCO, 12–22ms for 5 candidates).
+`Qwen/Qwen3-Reranker-0.6B` was initially selected but is incompatible with
+CrossEncoder in sentence-transformers: it is a generative (causal LM) model
+that scores via yes/no token probabilities, not a sequence-classification
+model. CrossEncoder adds a randomly initialized classification head,
+producing meaningless scores.
+
+**Inference backend:** `sentence-transformers` (SentenceTransformer for
+embeddings, CrossEncoder for reranking). Chosen over `fastembed` and
+`qwen3-embed` for model-swapping flexibility — any HuggingFace model works
+by changing a string. Pulls in PyTorch as a dependency (~2GB installed),
+available as optional `[semantic]` extra in pyproject.toml.
+
+### Protocols (swappable)
+
+**Embedder protocol** — callable: list of strings → list of vectors.
+`DocIndex` calls `self.embedder.embed()` and never knows which backend is
+running. Initial implementation: `SentenceTransformerEmbedder`. Future:
+HTTP client calling a local GPU server endpoint, cloud embedding API.
+
+**Reranker protocol** — callable: (query, list of candidates) → list of
+scored results. Initial implementation: `SentenceTransformerReranker`.
+
+Both protocols are lazy-imported — `sentence-transformers` and PyTorch
+are imported inside `__init__`, not at module level, so the existing test
+suite and `--no-semantic` mode stay fast.
+
+### Chunking strategy
+
+Navigation (list/read) stays heading-based — the AsciiDoc heading structure
+is the browsing interface. Search gets a separate `Chunker` protocol for
+retrieval units.
+
+**D2 prose-flush** is the chosen strategy (implemented in `AsciiDocChunker`).
+It uses AsciiDoc block delimiters (`|===`, `----`, `....`, `====`, `****`,
+`++++`, `--`) as primary structural boundaries. Content is accumulated into
+a buffer and flushed only when new prose appears after a non-prose block.
+This keeps code examples and tables attached to the prose that introduces
+them, splitting only when the topic genuinely shifts.
+
+The D2 strategy was selected after benchmarking 5 strategies (blank-line
+paragraph splitting, block+list+blanks, strong boundaries, block-only,
+and section-level). D2 produces the best distribution for embedding:
+~681 chunks, p50 at 165 words, only 11% under 50 words. Every chunk
+carries a `section_path` back-reference so search results link to
+navigable sections. No data is ever truncated or lost.
+
+**Chunker protocol remains open.** `HeadingChunker`, `ParagraphChunker`,
+and `AsciiDocChunker` all implement the same `Chunker` protocol. Future
+strategies (hierarchical embedding, sliding windows) can be added without
+changing the navigation layer or the pipeline.
+
+**No truncation, ever.** Chunks are emitted at their natural size.
+`max_seq_length` is not capped. The chunking strategy ensures most chunks
+are short enough for fast embedding; the ~22 large chunks (>1,000 words)
+are accepted as-is — the reranker sees full text regardless.
+
+### Embedding cache
+
+Pre-computed vectors saved as files (numpy `.npy` + metadata JSON), keyed
+by model name + corpus hash. Invalidates automatically when the model or
+corpus changes. Speeds up local dev restarts without adding a database
+dependency.
+
+**Local dev:** Cache persists across restarts. Code changes → ~7 second
+restart (model load + cached vectors). Corpus/model changes → re-embed
+(~4–5 min on CPU).
+
+**CI/CD:** Fresh rebuild each deployment (no persistent store for now).
+Future option: bake embeddings into Docker image at build time.
+
+### Memory and latency budget
+
+- **Embedding model in memory:** ~1.2GB (PyTorch CPU, float32)
+- **Reranker model in memory:** ~22MB (MiniLM)
+- **Vector index:** ~2.7MB (~681 × 1024 float32)
+- **Total:** ~1.3GB — reasonable for company server hardware
+- **Query latency target:** <200ms (embed query ~5–10ms, cosine similarity
+  trivial, rerank 20 candidates ~12–22ms on CPU)
+- **Startup (first run):** Model download ~1.2GB one-time + embed corpus
+  ~4–5 min on CPU
+- **Startup (cached):** Model load + vector load → ~7 seconds
+
+### Quality over speed tradeoff
+
+The server sees <20 concurrent users and low request volume. Happily trade
+an order of magnitude in speed for 2× better retrieval quality. Startup
+cost is acceptable. Query latency up to 200ms is invisible next to Claude's
 inference time.
+
+### Search result presentation
+
+Search results follow the Manus controlled-context principle — return
+enough for Claude to decide what to read, without flooding context.
+
+**Tiered output by chunk size:** Short chunks (under 200 words) are
+returned in full inline — Claude can often answer directly without a
+`docs read` follow-up. Long chunks (200+ words) get a query-aware
+snippet: the paragraph within the chunk with the highest query-term
+overlap, truncated to 300 characters. This replaces naive first-300-chars
+truncation.
+
+**Search interface:** Semantic search is the default. `--keyword` flag
+forces exact substring matching:
+
+```
+kicad docs search "copper pour"              → semantic (default)
+kicad docs search "copper pour" --keyword    → exact substring
+```
+
+When semantic search is unavailable (sentence-transformers not installed,
+or `--no-semantic` flag), search falls back to keyword mode silently.
+
+### Navigation aids
+
+**Cross-references:** `docs read` output includes a "Related:" block
+listing intra-guide cross-references extracted from `<<anchor-id>>`
+patterns in the AsciiDoc source. 349 resolved refs across 156 sections
+(84% resolution rate). Claude can follow these directly without
+additional searches.
+
+**Grep enhancements:** `-E` for regex alternation (`grep -E "design|class"`),
+`-A/-B/-C` for context lines around matches. Grep operates on the full
+search output including inline chunk content and snippets.
+
+**Line-range access:** `docs read path --lines 50-100` for precise
+navigation within long sections.
 
 ## Architecture constraints
 

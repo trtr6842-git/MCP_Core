@@ -125,8 +125,115 @@ def test_wc_chars():
     assert int(output) == len(_SAMPLE)
 
 
+def test_grep_regex_alternation():
+    output, code = run_filter('grep -E "alpha|lima"', _SAMPLE)
+    assert code == 0
+    assert 'alpha' in output
+    assert 'lima' in output
+    assert 'bravo' not in output
+
+
+def test_grep_regex_case_insensitive():
+    output, code = run_filter('grep -E -i CHARLIE', _SAMPLE)
+    assert code == 0
+    assert 'charlie' in output
+
+
+def test_grep_regex_no_match():
+    output, code = run_filter('grep -E "^zzz$"', _SAMPLE)
+    assert code == 1
+    assert output == ''
+
+
 def test_unknown_filter():
     output, code = run_filter('sort', _SAMPLE)
     assert code == 1
     assert '[error]' in output
     assert 'unknown filter' in output
+
+
+# --- grep context flags (-A, -B, -C) ---
+
+_CTX = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten"
+
+
+def test_grep_after_context():
+    output, code = run_filter('grep -A 2 three', _CTX)
+    assert code == 0
+    lines = output.split('\n')
+    assert 'three' in lines
+    assert 'four' in lines
+    assert 'five' in lines
+    assert 'two' not in lines
+
+
+def test_grep_before_context():
+    output, code = run_filter('grep -B 2 three', _CTX)
+    assert code == 0
+    lines = output.split('\n')
+    assert 'three' in lines
+    assert 'two' in lines
+    assert 'one' in lines
+    assert 'four' not in lines
+
+
+def test_grep_context_both():
+    output, code = run_filter('grep -C 1 three', _CTX)
+    assert code == 0
+    lines = output.split('\n')
+    assert 'two' in lines
+    assert 'three' in lines
+    assert 'four' in lines
+    assert 'one' not in lines
+    assert 'five' not in lines
+
+
+def test_grep_context_separator_between_non_adjacent():
+    # Match 'one' and 'ten' with -A 1; groups should not overlap → '--' separator
+    output, code = run_filter('grep -A 1 -E "^one$|^ten$"', _CTX)
+    assert code == 0
+    assert '--' in output
+    lines = output.split('\n')
+    assert 'one' in lines
+    assert 'two' in lines
+    assert 'ten' in lines
+
+
+def test_grep_context_merge_adjacent():
+    # 'three' and 'four' are adjacent lines; with -A 1 their ranges overlap → no '--'
+    output, code = run_filter('grep -A 1 -E "^three$|^four$"', _CTX)
+    assert code == 0
+    assert '--' not in output
+
+
+def test_grep_context_with_case_insensitive():
+    output, code = run_filter('grep -i -A 1 THREE', _CTX)
+    assert code == 0
+    assert 'three' in output
+    assert 'four' in output
+
+
+def test_grep_context_with_regex():
+    output, code = run_filter('grep -E -A 1 "^t(wo|en)$"', _CTX)
+    assert code == 0
+    assert 'two' in output
+    assert 'three' in output  # after 'two'
+    assert 'ten' in output
+
+
+def test_grep_count_ignores_context():
+    output, code = run_filter('grep -c -A 2 three', _CTX)
+    assert code == 0
+    assert output.strip() == '1'
+
+
+def test_grep_context_missing_number():
+    output, code = run_filter('grep -A three', _CTX)
+    assert code == 1
+    assert '[error]' in output
+
+
+def test_grep_context_non_integer():
+    output, code = run_filter('grep -A abc three', _CTX)
+    assert code == 1
+    assert '[error]' in output

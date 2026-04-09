@@ -64,6 +64,9 @@ def _grep(args: list[str], stdin: str) -> tuple[str, int]:
         case_insensitive = False
         invert = False
         count_only = False
+        use_regex = False
+        after_context = 0
+        before_context = 0
         pattern = None
 
         i = 0
@@ -75,6 +78,32 @@ def _grep(args: list[str], stdin: str) -> tuple[str, int]:
                 invert = True
             elif arg == '-c':
                 count_only = True
+            elif arg == '-E':
+                use_regex = True
+            elif arg in ('-A', '-B', '-C'):
+                if i + 1 >= len(args):
+                    return (
+                        f'[error] grep: {arg} requires a numeric argument\n'
+                        'Usage: grep [-i] [-v] [-c] [-E] [-A N] [-B N] [-C N] <pattern>',
+                        1,
+                    )
+                try:
+                    n = int(args[i + 1])
+                except ValueError:
+                    return (
+                        f'[error] grep: {arg} requires a numeric argument: {args[i + 1]!r}\n'
+                        'Usage: grep [-i] [-v] [-c] [-E] [-A N] [-B N] [-C N] <pattern>',
+                        1,
+                    )
+                if arg == '-A':
+                    after_context = n
+                elif arg == '-B':
+                    before_context = n
+                else:  # -C
+                    after_context = n
+                    before_context = n
+                i += 2
+                continue
             elif arg.startswith('-') and len(arg) > 1 and all(c in 'ivc' for c in arg[1:]):
                 # Combined flags like -iv
                 case_insensitive = 'i' in arg[1:]
@@ -83,26 +112,59 @@ def _grep(args: list[str], stdin: str) -> tuple[str, int]:
             elif pattern is None:
                 pattern = arg
             else:
-                return f'[error] grep: unexpected argument: {arg}\nUsage: grep [-i] [-v] [-c] <pattern>', 1
+                return (
+                    f'[error] grep: unexpected argument: {arg}\n'
+                    'Usage: grep [-i] [-v] [-c] [-E] [-A N] [-B N] [-C N] <pattern>',
+                    1,
+                )
             i += 1
 
         if pattern is None:
-            return '[error] grep: missing pattern\nUsage: grep [-i] [-v] [-c] <pattern>', 1
+            return '[error] grep: missing pattern\nUsage: grep [-i] [-v] [-c] [-E] [-A N] [-B N] [-C N] <pattern>', 1
 
         lines = stdin.split('\n')
-        if case_insensitive:
+        if use_regex:
+            import re
+            re_flags = re.IGNORECASE if case_insensitive else 0
+            match_indices = [idx for idx, line in enumerate(lines) if bool(re.search(pattern, line, re_flags)) != invert]
+        elif case_insensitive:
             match_pattern = pattern.lower()
-            matched = [line for line in lines if (match_pattern in line.lower()) != invert]
+            match_indices = [idx for idx, line in enumerate(lines) if (match_pattern in line.lower()) != invert]
         else:
-            matched = [line for line in lines if (pattern in line) != invert]
+            match_indices = [idx for idx, line in enumerate(lines) if (pattern in line) != invert]
 
         if count_only:
-            return str(len(matched)), 0
+            return str(len(match_indices)), 0
 
-        if not matched:
+        if not match_indices:
             return '', 1  # grep returns exit code 1 on no match
 
-        return '\n'.join(matched), 0
+        if before_context == 0 and after_context == 0:
+            return '\n'.join(lines[idx] for idx in match_indices), 0
+
+        # Expand match indices into ranges [start, end)
+        ranges = []
+        for idx in match_indices:
+            start = max(0, idx - before_context)
+            end = min(len(lines), idx + after_context + 1)
+            ranges.append([start, end])
+
+        # Merge overlapping/adjacent ranges
+        merged = [ranges[0]]
+        for start, end in ranges[1:]:
+            if start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+
+        # Output with -- separator between non-adjacent groups
+        output_lines = []
+        for group_idx, (start, end) in enumerate(merged):
+            if group_idx > 0:
+                output_lines.append('--')
+            output_lines.extend(lines[start:end])
+
+        return '\n'.join(output_lines), 0
     except Exception:
         tb = traceback.format_exc()
         _logger.error(f"Exception in grep: {tb}")

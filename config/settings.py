@@ -19,3 +19,6 @@ MCP_PORT: int = int(os.environ.get("MCP_PORT", "8080"))
 
 # Directory for tool call log files
 LOG_DIR: str = os.environ.get("LOG_DIR", "logs")
+
+# Directory for embedding cache files
+EMBEDDING_CACHE_DIR: str = os.environ.get("EMBEDDING_CACHE_DIR", "embedding_cache")

@@ -61,7 +61,7 @@ class DocsCommandGroup(CommandGroup):
             'docs — KiCad documentation tools\n'
             '\n'
             'Subcommands:\n'
-            '  search <query> [--guide <name>]   Search documentation sections\n'
+            '  search <query> [--guide <n>] [--keyword]   Search documentation sections\n'
             '  read <path>                       Read a specific section\n'
             '  list [path] [--depth N]           Browse guide structure\n'
             '\n'
@@ -75,12 +75,17 @@ class DocsCommandGroup(CommandGroup):
     def _search(self, args: list[str]) -> CommandResult:
         query = None
         guide = None
+        keyword_mode = False
 
         i = 0
         while i < len(args):
             if args[i] == '--guide' and i + 1 < len(args):
                 guide = args[i + 1]
                 i += 2
+                continue
+            elif args[i] == '--keyword':
+                keyword_mode = True
+                i += 1
                 continue
             elif args[i] in ('--help', '-h'):
                 return self._search_help()
@@ -94,33 +99,55 @@ class DocsCommandGroup(CommandGroup):
         if query is None:
             return self._search_help()
 
-        _logger.debug(f"Searching: query='{query}', guide={guide}")
-        results = self._index.search(query, guide=guide)
+        mode = "keyword" if keyword_mode else "auto"
+        _logger.debug(f"Searching: query='{query}', guide={guide}, mode={mode}")
+        results = self._index.search(query, guide=guide, mode=mode)
         _logger.debug(f"Search returned {len(results)} result(s)")
 
         if not results:
             guide_hint = f' in {guide}' if guide else ''
-            suggestion_lines = ['Note: keyword search matches exact substrings only']
-            if guide:
-                # Suggest a shorter/simpler term from the query
-                short_term = query.split()[0] if ' ' in query else query
-                suggestion_lines.append(f'Try: kicad docs search "{short_term}" --guide {guide}')
-                suggestion_lines.append(f'Browse: kicad docs list {guide}')
+            semantic_was_used = (not keyword_mode) and self._index.has_semantic
+            if semantic_was_used:
+                suggestion_lines = [f'Try: kicad docs search "{query}" --keyword']
+                if guide:
+                    suggestion_lines.append(f'Browse: kicad docs list {guide}')
+                else:
+                    suggestion_lines.append('Browse: kicad docs list')
+                return CommandResult(
+                    output=format_error(
+                        f'no semantic matches for "{query}"{guide_hint}',
+                        '\n'.join(suggestion_lines),
+                    ),
+                    exit_code=1,
+                )
             else:
-                suggestion_lines.append('Browse: kicad docs list')
-            return CommandResult(
-                output=format_error(
-                    f'no keyword matches for "{query}"{guide_hint}',
-                    '\n'.join(suggestion_lines),
-                ),
-                exit_code=1,
-            )
+                suggestion_lines = ['Note: keyword search matches exact substrings only']
+                if guide:
+                    short_term = query.split()[0] if ' ' in query else query
+                    suggestion_lines.append(f'Try: kicad docs search "{short_term}" --guide {guide}')
+                    suggestion_lines.append(f'Browse: kicad docs list {guide}')
+                else:
+                    suggestion_lines.append('Browse: kicad docs list')
+                return CommandResult(
+                    output=format_error(
+                        f'no keyword matches for "{query}"{guide_hint}',
+                        '\n'.join(suggestion_lines),
+                    ),
+                    exit_code=1,
+                )
 
         lines = []
         for r in results:
             lines.append(f'{r["title"]}')
             lines.append(f'  read: kicad docs read {r["path"]}')
             lines.append(f'  url: {r["url"]}')
+            snippet = r.get("snippet")
+            if snippet:
+                if r.get("snippet_type") == "full":
+                    for line in snippet.splitlines():
+                        lines.append(f'  {line}')
+                else:
+                    lines.append(f'  snippet: {snippet}')
             lines.append('')
 
         return CommandResult(output='\n'.join(lines).rstrip())
@@ -129,17 +156,19 @@ class DocsCommandGroup(CommandGroup):
         text = (
             'docs search — search KiCad documentation\n'
             '\n'
-            'Usage: kicad docs search <query> [--guide <name>]\n'
+            'Usage: kicad docs search <query> [--guide <name>] [--keyword]\n'
             '\n'
             'Arguments:\n'
             '  <query>          Search string (case-insensitive, matches title and content)\n'
             '\n'
             'Options:\n'
             '  --guide <name>   Restrict search to a specific guide (e.g., pcbnew, eeschema)\n'
+            '  --keyword        Use exact substring matching instead of semantic search\n'
             '\n'
             'Examples:\n'
             '  kicad docs search "pad properties"\n'
             '  kicad docs search "board setup" --guide pcbnew\n'
+            '  kicad docs search "copper pour" --keyword\n'
             '  kicad docs search "design rules" | grep -i stackup'
         )
         return CommandResult(output=text)
@@ -148,7 +177,34 @@ class DocsCommandGroup(CommandGroup):
         if not args or args[0] in ('--help', '-h'):
             return self._read_help()
 
-        path = ' '.join(args)
+        lines_arg = None
+        path_parts = []
+
+        i = 0
+        while i < len(args):
+            if args[i] == '--lines':
+                if i + 1 >= len(args):
+                    return CommandResult(
+                        output=format_error(
+                            '--lines requires a value',
+                            'Usage: kicad docs read <path> --lines START-END\n'
+                            'Examples: --lines 50-100, --lines 50-, --lines -100',
+                        ),
+                        exit_code=1,
+                    )
+                lines_arg = args[i + 1]
+                i += 2
+                continue
+            elif args[i] in ('--help', '-h'):
+                return self._read_help()
+            else:
+                path_parts.append(args[i])
+            i += 1
+
+        path = ' '.join(path_parts)
+        if not path:
+            return self._read_help()
+
         _logger.debug(f"Reading section: {path}")
 
         section = self._index.get_section(path)
@@ -172,27 +228,70 @@ class DocsCommandGroup(CommandGroup):
                 exit_code=1,
             )
 
-        lines = [
+        content = section['content']
+        lines_info = None
+
+        if lines_arg is not None:
+            try:
+                if '-' not in lines_arg:
+                    raise ValueError('no dash in range')
+                parts = lines_arg.split('-', 1)
+                start = int(parts[0]) if parts[0] else 1
+                end = int(parts[1]) if parts[1] else None
+            except ValueError:
+                return CommandResult(
+                    output=format_error(
+                        f'invalid --lines value: {lines_arg!r}',
+                        'Usage: --lines START-END\nExamples: --lines 50-100, --lines 50-, --lines -100',
+                    ),
+                    exit_code=1,
+                )
+
+            content_lines = content.split('\n')
+            total = len(content_lines)
+            start_idx = max(0, start - 1)  # convert 1-indexed to 0-indexed
+            end_idx = total if end is None else min(total, end)
+            content = '\n'.join(content_lines[start_idx:end_idx])
+            actual_start = start_idx + 1
+            actual_end = end_idx
+            lines_info = f'Lines: {actual_start}-{actual_end} of {total}'
+
+        header = [
             f'# {section["title"]}',
             f'Guide: {section["guide"]} | Version: {section["version"]}',
             f'URL: {section["url"]}',
-            '',
-            section['content'],
         ]
-        return CommandResult(output='\n'.join(lines))
+        if lines_info:
+            header.append(lines_info)
+        header.append('')
+        header.append(content)
+
+        cross_refs = section.get('cross_refs', [])
+        if cross_refs:
+            header.append('')
+            header.append('Related:')
+            for ref_path in cross_refs:
+                header.append(f'  \u2192 kicad docs read {ref_path}')
+
+        return CommandResult(output='\n'.join(header))
 
     def _read_help(self) -> CommandResult:
         text = (
             'docs read — read a documentation section\n'
             '\n'
-            'Usage: kicad docs read <path>\n'
+            'Usage: kicad docs read <path> [--lines START-END]\n'
             '\n'
             'Arguments:\n'
             '  <path>    Section path in format "guide/Section Title"\n'
             '            e.g., pcbnew/Board Setup, eeschema/Symbols\n'
             '\n'
+            'Options:\n'
+            '  --lines START-END    Show only lines START through END (1-indexed)\n'
+            '                       Examples: --lines 50-100, --lines 50-, --lines -100\n'
+            '\n'
             'Examples:\n'
             '  kicad docs read pcbnew/Basic PCB concepts\n'
+            '  kicad docs read pcbnew/Board Setup --lines 50-100\n'
             '  kicad docs read pcbnew/Board Setup | grep stackup\n'
             '  kicad docs read eeschema/Symbols | head 20'
         )

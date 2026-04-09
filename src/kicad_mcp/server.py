@@ -7,6 +7,7 @@ CLI-style interface with chain parsing, routing, and built-in filters.
 import argparse
 import logging
 import os
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -42,27 +43,76 @@ def _print_startup_banner(
     host: str,
     port: int,
     doc_source: str,
+    semantic_status: str,
 ) -> None:
     """Print a startup banner showing server configuration."""
     print(f"[KiCad MCP] user: {user}")
     print(f"[KiCad MCP] docs: {doc_path} ({doc_source})")
     print(f"[KiCad MCP] version: {version}")
     print(f"[KiCad MCP] endpoint: http://{host}:{port}/mcp")
+    print(f"[KiCad MCP] semantic: {semantic_status}")
 
 
-def create_server(user: str, host: str = "127.0.0.1", port: int = 8080) -> FastMCP:
+def create_server(
+    user: str, host: str = "127.0.0.1", port: int = 8080, semantic: bool = True
+) -> FastMCP:
     """Create and configure the FastMCP server instance."""
     version = settings.KICAD_DOC_VERSION
     doc_path = resolve_doc_path(version)
-    index = DocIndex(doc_path, version)
     logger = CallLogger(Path(settings.LOG_DIR), user)
     tool_logger = get_tool_logger()
 
     # Determine doc source (env var or cache)
     doc_source = "KICAD_DOC_PATH" if os.environ.get("KICAD_DOC_PATH") else "docs_cache"
 
+    # Semantic search initialization
+    embedder = None
+    reranker = None
+    chunker = None
+    cache = None
+    if not semantic:
+        semantic_status = "disabled (--no-semantic)"
+    else:
+        try:
+            import sentence_transformers  # noqa: F401  — test import only
+
+            from kicad_mcp.semantic.st_embedder import SentenceTransformerEmbedder
+            from kicad_mcp.semantic.st_reranker import SentenceTransformerReranker
+            from kicad_mcp.semantic.asciidoc_chunker import AsciiDocChunker
+            from kicad_mcp.semantic.embedding_cache import EmbeddingCache
+
+            print("[KiCad MCP] Loading embedding model...")
+            _t0 = time.perf_counter()
+            embedder = SentenceTransformerEmbedder()
+            print(f"[KiCad MCP] Embedding model loaded ({time.perf_counter() - _t0:.1f}s)")
+
+            print("[KiCad MCP] Loading reranker model...")
+            _t0 = time.perf_counter()
+            reranker = SentenceTransformerReranker()
+            print(f"[KiCad MCP] Reranker model loaded ({time.perf_counter() - _t0:.1f}s)")
+            chunker = AsciiDocChunker()
+            cache_dir = Path(settings.EMBEDDING_CACHE_DIR)
+            cache = EmbeddingCache(cache_dir)
+            semantic_status = (
+                f"enabled ({embedder.model_name} + {reranker.model_name})"
+            )
+        except ImportError:
+            logging.getLogger(__name__).warning(
+                "sentence-transformers not installed, semantic search disabled"
+            )
+            semantic_status = "disabled (sentence-transformers not installed)"
+
+    index = DocIndex(
+        doc_path,
+        version,
+        embedder=embedder,
+        reranker=reranker,
+        chunker=chunker,
+        cache=cache,
+    )
+
     # Print startup banner
-    _print_startup_banner(user, doc_path, version, host, port, doc_source)
+    _print_startup_banner(user, doc_path, version, host, port, doc_source, semantic_status)
 
     # Build CLI infrastructure
     router = Router()
@@ -88,8 +138,9 @@ EXAMPLES:
         url: https://docs.kicad.org/...
   kicad docs read pcbnew/Working with zones
   kicad docs list pcbnew --depth 1
+  kicad docs search "copper pour"                    Search (semantic)
+  kicad docs search "copper pour" --keyword          Search (exact match)
   kicad docs search "pad" --guide pcbnew | grep thermal
-  kicad docs search "copper pour" || kicad docs search "filled zone"
 
 FILTERS: grep, head, tail, wc (pipe with |)
 OPERATORS: | (pipe) && (and) || (or) ; (seq)
@@ -137,10 +188,12 @@ environment variables:
                        docs_cache/ if not set)
   KICAD_DOC_VERSION    Documentation version branch (default: 9.0)
   LOG_DIR              Log file directory (default: logs/)
+  EMBEDDING_CACHE_DIR  Embedding cache directory (default: embedding_cache/)
 
 examples:
   python -m kicad_mcp.server --user ttyle
   python -m kicad_mcp.server --user ttyle --port 9090
+  python -m kicad_mcp.server --user ttyle --no-semantic
 """,
     )
     parser.add_argument(
@@ -162,12 +215,22 @@ examples:
         metavar="USER",
         help="Username for logging (default: anonymous)",
     )
+    parser.add_argument(
+        "--no-semantic",
+        action="store_true",
+        help="Disable semantic search (faster startup for debugging)",
+    )
     args = parser.parse_args()
 
     # Configure logging before starting server
     configure_logging(settings.LOG_DIR)
 
-    mcp = create_server(args.user, host=args.host, port=args.port)
+    mcp = create_server(
+        args.user,
+        host=args.host,
+        port=args.port,
+        semantic=not args.no_semantic,
+    )
     mcp.run(transport="streamable-http")
 
 

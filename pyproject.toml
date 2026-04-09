@@ -8,6 +8,13 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+semantic = [
+    "sentence-transformers>=2.7.0",
+    "torch",
+    "numpy",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

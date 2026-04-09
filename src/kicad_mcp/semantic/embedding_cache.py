@@ -1,0 +1,136 @@
+"""
+Embedding cache — saves pre-computed vectors to disk and reloads them
+on subsequent starts.
+
+Cache layout (one subdirectory per model+dimension combo):
+
+    embedding_cache/
+        Qwen--Qwen3-Embedding-0.6B_1024/
+            embeddings.npy      — float32 array (N, dims)
+            metadata.json       — model_name, dimensions, corpus_hash,
+                                  chunk_ids, chunk_count, created_at
+
+Cache is invalidated automatically when model name, dimensions, or
+corpus content changes (corpus_hash changes).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingCache:
+    def __init__(self, cache_dir: Path) -> None:
+        self.cache_dir = cache_dir
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def corpus_hash(self, chunks: "list") -> str:
+        """Compute a deterministic SHA-256 hash of chunk IDs + text content.
+
+        Sorted by chunk_id first so order of the input list doesn't matter.
+        """
+        h = hashlib.sha256()
+        for chunk in sorted(chunks, key=lambda c: c.chunk_id):
+            h.update(chunk.chunk_id.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(chunk.text.encode("utf-8"))
+            h.update(b"\x00")
+        return h.hexdigest()
+
+    def load(
+        self, model_name: str, dimensions: int, corpus_hash: str
+    ) -> "tuple | None":
+        """Load cached embeddings if they exist and match.
+
+        Returns (embeddings_array, chunk_ids) on cache hit, None on miss.
+        """
+        import numpy as np  # noqa: PLC0415 — lazy import
+
+        subdir = self._subdir(model_name, dimensions)
+        meta_path = subdir / "metadata.json"
+        npy_path = subdir / "embeddings.npy"
+
+        if not subdir.exists():
+            return None
+
+        # Read and validate metadata
+        try:
+            with meta_path.open("r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            logger.debug("Embedding cache: metadata read failed: %s", exc)
+            return None
+
+        if (
+            meta.get("corpus_hash") != corpus_hash
+            or meta.get("model_name") != model_name
+            or meta.get("dimensions") != dimensions
+        ):
+            logger.debug("Embedding cache: metadata mismatch — cache miss")
+            return None
+
+        # Load numpy array
+        try:
+            embeddings = np.load(str(npy_path))
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.debug("Embedding cache: .npy load failed: %s", exc)
+            return None
+
+        chunk_ids: list[str] = meta["chunk_ids"]
+        logger.info(
+            "Embedding cache: hit — %d vectors loaded from %s",
+            len(chunk_ids),
+            subdir,
+        )
+        return embeddings, chunk_ids
+
+    def save(
+        self,
+        model_name: str,
+        dimensions: int,
+        corpus_hash: str,
+        embeddings: "object",
+        chunk_ids: list[str],
+    ) -> None:
+        """Save embeddings and metadata to cache."""
+        import numpy as np  # noqa: PLC0415 — lazy import
+
+        subdir = self._subdir(model_name, dimensions)
+        subdir.mkdir(parents=True, exist_ok=True)
+
+        npy_path = subdir / "embeddings.npy"
+        meta_path = subdir / "metadata.json"
+
+        np.save(str(npy_path), embeddings)
+
+        meta = {
+            "model_name": model_name,
+            "dimensions": dimensions,
+            "corpus_hash": corpus_hash,
+            "chunk_ids": chunk_ids,
+            "chunk_count": len(chunk_ids),
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        with meta_path.open("w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+        logger.info(
+            "Embedding cache: saved %d vectors to %s", len(chunk_ids), subdir
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _subdir(self, model_name: str, dimensions: int) -> Path:
+        safe_model = model_name.replace("/", "--")
+        return self.cache_dir / f"{safe_model}_{dimensions}"
