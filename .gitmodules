@@ -1,0 +1,9 @@
+[submodule "docs_cache/10.0"]
+	path = docs_cache/10.0
+	url = https://gitlab.com/kicad/services/kicad-doc.git
+	branch = 10.0
+
+[submodule "docs_cache/9.0"]
+	path = docs_cache/9.0
+	url = https://gitlab.com/kicad/services/kicad-doc.git
+	branch = 9.0
