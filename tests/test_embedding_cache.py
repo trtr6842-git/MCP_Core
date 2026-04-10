@@ -83,14 +83,37 @@ def test_cache_miss_when_corpus_hash_differs(tmp_path):
     assert cache.load(MODEL, DIMS, "hash_b", CHUNKER_HASH, DOC_REF) is None
 
 
-def test_cache_miss_when_model_name_differs(tmp_path):
+def test_alias_hit_when_content_matches_different_model_name(tmp_path):
+    """load() returns a hit when the model name differs but all content hashes match.
+
+    This handles the case where the same underlying model is known by different
+    names (e.g. HuggingFace 'Qwen/Qwen3-Embedding-0.6B' vs LM Studio's
+    'text-embedding-qwen3-embedding-0.6b'), so a cache built with one name is
+    still usable when falling back to the other.
+    """
     cache = make_cache(tmp_path)
     embeddings = fake_embeddings()
     chunk_ids = fake_chunk_ids()
     corpus_hash = "abc123"
 
     cache.save(MODEL, DIMS, corpus_hash, CHUNKER_HASH, DOC_REF, embeddings, chunk_ids)
-    assert cache.load("other/model", DIMS, corpus_hash, CHUNKER_HASH, DOC_REF) is None
+    result = cache.load("other/model", DIMS, corpus_hash, CHUNKER_HASH, DOC_REF)
+    assert result is not None
+    loaded_embeddings, loaded_ids = result
+    np.testing.assert_array_equal(loaded_embeddings, embeddings)
+    assert loaded_ids == chunk_ids
+
+
+def test_alias_miss_when_chunker_hash_differs_for_alias(tmp_path):
+    """Alias fallback does NOT match when chunker_hash differs — prevents using
+    embeddings built with a different chunking algorithm."""
+    cache = make_cache(tmp_path)
+    embeddings = fake_embeddings()
+    chunk_ids = fake_chunk_ids()
+    corpus_hash = "abc123"
+
+    cache.save(MODEL, DIMS, corpus_hash, "chunker_v1", DOC_REF, embeddings, chunk_ids)
+    assert cache.load("other/model", DIMS, corpus_hash, "chunker_v2", DOC_REF) is None
 
 
 def test_cache_miss_when_dimensions_differ(tmp_path):

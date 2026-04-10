@@ -90,43 +90,90 @@ class EmbeddingCache:
 
         Returns (embeddings_array, chunk_ids) on cache hit, None on miss.
 
-        A miss is returned when any of model_name, dimensions, doc_ref,
-        corpus_hash, or chunker_hash don't match the stored metadata.
+        First tries the exact model_name directory. If that misses, scans all
+        other subdirectories for a cache that matches on dimensions, corpus_hash,
+        chunker_hash, and doc_ref — ignoring model_name. This handles the case
+        where the same model is known by different names (e.g. HuggingFace name
+        vs the name an HTTP server reports), so a cache built with an HTTP
+        endpoint remains usable when falling back to a local embedder.
+
         Caches written before doc_ref was introduced (no "doc_ref" key) are
         always treated as misses so they rebuild with the updated schema.
         """
         import numpy as np  # noqa: PLC0415 — lazy import
 
-        subdir = self._subdir(model_name, dimensions)
+        result = self._load_from_subdir(
+            self._subdir(model_name, dimensions),
+            model_name, dimensions, corpus_hash, chunker_hash, doc_ref,
+        )
+        if result is not None:
+            return result
+
+        # Fallback: scan other subdirs for a content-identical cache under a
+        # different model name (e.g. LM Studio uses a different name than HF).
+        version_dir = self.cache_dir / self.version
+        if not version_dir.is_dir():
+            return None
+        exact_subdir = self._subdir(model_name, dimensions)
+        for subdir in version_dir.iterdir():
+            if not subdir.is_dir() or subdir == exact_subdir:
+                continue
+            result = self._load_from_subdir(
+                subdir, None, dimensions, corpus_hash, chunker_hash, doc_ref,
+            )
+            if result is not None:
+                cached_model = subdir.name  # just for the log message
+                logger.info(
+                    "Embedding cache: model-name alias hit — "
+                    "requested '%s', found compatible cache in '%s'",
+                    model_name, cached_model,
+                )
+                return result
+
+        return None
+
+    def _load_from_subdir(
+        self,
+        subdir: Path,
+        model_name: "str | None",
+        dimensions: int,
+        corpus_hash: str,
+        chunker_hash: str,
+        doc_ref: str,
+    ) -> "tuple | None":
+        """Attempt to load a cache from a specific subdirectory.
+
+        Pass model_name=None to skip the model_name check (alias fallback).
+        """
+        import numpy as np  # noqa: PLC0415 — lazy import
+
         meta_path = subdir / "metadata.json"
         npy_path = subdir / "embeddings.npy"
 
         if not subdir.exists():
             return None
 
-        # Read and validate metadata
         try:
             with meta_path.open("r", encoding="utf-8") as f:
                 meta = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-            logger.debug("Embedding cache: metadata read failed: %s", exc)
+            logger.debug("Embedding cache: metadata read failed (%s): %s", subdir.name, exc)
             return None
 
         if (
             meta.get("corpus_hash") != corpus_hash
             or meta.get("chunker_hash") != chunker_hash
             or meta.get("doc_ref") != doc_ref
-            or meta.get("model_name") != model_name
             or meta.get("dimensions") != dimensions
+            or (model_name is not None and meta.get("model_name") != model_name)
         ):
-            logger.debug("Embedding cache: metadata mismatch — cache miss")
+            logger.debug("Embedding cache: metadata mismatch — %s", subdir.name)
             return None
 
-        # Load numpy array
         try:
             embeddings = np.load(str(npy_path))
         except (FileNotFoundError, OSError, ValueError) as exc:
-            logger.debug("Embedding cache: .npy load failed: %s", exc)
+            logger.debug("Embedding cache: .npy load failed (%s): %s", subdir.name, exc)
             return None
 
         chunk_ids: list[str] = meta["chunk_ids"]
