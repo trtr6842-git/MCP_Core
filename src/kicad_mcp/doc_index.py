@@ -200,6 +200,41 @@ class DocIndex:
         """True if a VectorIndex was built (semantic search is available)."""
         return self._vector_index is not None
 
+    @property
+    def sections_by_guide(self) -> dict[str, list]:
+        """Full section dicts indexed by guide name.
+
+        Used by server.py to access sections for external chunking and
+        cache/embedding setup (cache-first architecture).
+        """
+        return self._sections_by_guide
+
+    def setup_semantic(
+        self,
+        vector_index: Any,
+        query_embedder: Any,
+        reranker: Any,
+        chunk_texts: dict[str, str],
+    ) -> None:
+        """Configure semantic search with a pre-built VectorIndex.
+
+        Called by server.py after it has resolved the cache-hit/rebuild/error
+        logic externally. Avoids re-doing section loading or chunking.
+
+        Args:
+            vector_index: A fully-built VectorIndex instance.
+            query_embedder: The embedder to use for search-time query embedding
+                (HttpEmbedder or SentenceTransformerEmbedder).
+            reranker: The reranker for candidate re-scoring (or None).
+            chunk_texts: Mapping of chunk_id → text, used to extract snippets
+                in _search_semantic().
+        """
+        self._vector_index = vector_index
+        self._embedder = query_embedder
+        self._reranker = reranker
+        self._chunk_texts = chunk_texts
+        self._chunks = []  # not needed after external build
+
     def list_sections(self, path: str | None = None) -> list[dict[str, Any]]:
         """
         Return section summaries, optionally filtered by path.

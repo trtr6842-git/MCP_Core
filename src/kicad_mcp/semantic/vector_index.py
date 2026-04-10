@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 _BATCH_SIZE = 32
-_SOLO_WORD_THRESHOLD = 500
+_SOLO_WORD_THRESHOLD = 2000
 
 
 def _fmt_time(seconds: float) -> str:
@@ -35,7 +35,11 @@ def _fmt_time(seconds: float) -> str:
     return f"{s}s"
 
 
-def _make_batches(chunks: list) -> list[list[tuple]]:
+def _make_batches(
+    chunks: list,
+    max_batch_size: int = 32,
+    token_budget: int | None = None,
+) -> list[list[tuple]]:
     """Sort chunks by text length and group into smart batches.
 
     Returns a list of batches. Each batch is a list of
@@ -43,36 +47,51 @@ def _make_batches(chunks: list) -> list[list[tuple]]:
 
     Grouping rules:
     - Chunks with > _SOLO_WORD_THRESHOLD words are always solo (batch of 1).
-    - Remaining chunks are sorted by len(chunk.text) and grouped so that:
-        * batch size stays <= _BATCH_SIZE, AND
-        * the longest chunk in a batch is at most 2x the shortest (limits padding waste).
+    - Remaining chunks are sorted descending by len(chunk.text) and grouped so that:
+        * batch size stays <= max_batch_size, AND
+        * the longest chunk in a batch is at most 2x the shortest (limits padding waste), AND
+        * estimated token total stays <= token_budget (when provided).
+    - Token estimation: len(chunk.text.split()) * 1.3 (word→token ratio for technical English).
+    - When token_budget is None, falls back to count-only logic (backward compatible).
     """
     indexed = [
         (i, chunk, len(chunk.text.split()))
         for i, chunk in enumerate(chunks)
     ]
-    indexed.sort(key=lambda x: len(x[1].text))
+    indexed.sort(key=lambda x: len(x[1].text), reverse=True)
 
     batches: list[list[tuple]] = []
     current_batch: list[tuple] = []
+    current_tokens: float = 0.0
 
     for orig_idx, chunk, word_count in indexed:
         if word_count > _SOLO_WORD_THRESHOLD:
             if current_batch:
                 batches.append(current_batch)
                 current_batch = []
+                current_tokens = 0.0
             batches.append([(orig_idx, chunk, word_count)])
         else:
+            estimated_tokens = word_count * 1.3
             if not current_batch:
                 current_batch.append((orig_idx, chunk, word_count))
+                current_tokens = estimated_tokens
             else:
-                shortest_len = len(current_batch[0][1].text)
+                longest_len = len(current_batch[0][1].text)
                 new_len = len(chunk.text)
-                if len(current_batch) >= _BATCH_SIZE or new_len > 2 * shortest_len:
+                over_count = len(current_batch) >= max_batch_size
+                over_ratio = longest_len > 2 * new_len
+                over_tokens = (
+                    token_budget is not None
+                    and current_tokens + estimated_tokens > token_budget
+                )
+                if over_count or over_ratio or over_tokens:
                     batches.append(current_batch)
                     current_batch = [(orig_idx, chunk, word_count)]
+                    current_tokens = estimated_tokens
                 else:
                     current_batch.append((orig_idx, chunk, word_count))
+                    current_tokens += estimated_tokens
 
     if current_batch:
         batches.append(current_batch)
@@ -163,7 +182,9 @@ class VectorIndex:
                 return
 
         # Cache miss or no cache — embed all chunks with smart batching
-        batches = _make_batches(chunks)
+        max_batch_size = getattr(embedder, "batch_size", _BATCH_SIZE)
+        token_budget = getattr(embedder, "batch_token_budget", None)
+        batches = _make_batches(chunks, max_batch_size, token_budget)
         embeddings_by_idx: dict[int, list[float]] = {}
 
         show_progress = getattr(embedder, "_show_build_progress", False)
@@ -174,6 +195,7 @@ class VectorIndex:
             bar_width = 20
             done = 0
             t_start = _time.perf_counter()
+            prev_line_len = 0
 
             for batch in batches:
                 batch_ordered = sorted(batch, key=lambda x: x[0])
@@ -192,13 +214,14 @@ class VectorIndex:
                 else:
                     avg_wc = sum(item[2] for item in batch) // len(batch)
                     batch_info = f"(batch {len(batch)}×~{avg_wc}w)"
-                print(
-                    f"\r  [KiCad MCP] Embedding [{bar}] {done}/{n}  "
-                    f"{_fmt_time(elapsed)}  ETA {_fmt_time(eta)}  {batch_info}",
-                    end="",
-                    flush=True,
+                line = (
+                    f"  [KiCad MCP] Embedding [{bar}] {done}/{n}  "
+                    f"{_fmt_time(elapsed)}  ETA {_fmt_time(eta)}  {batch_info}"
                 )
-            print()  # clear the \r line
+                # Pad to previous line length to overwrite any residual characters
+                print(f"\r{line.ljust(prev_line_len)}", end="", flush=True)
+                prev_line_len = len(line)
+            print()  # newline to leave the completed bar on screen
         else:
             for batch in batches:
                 batch_ordered = sorted(batch, key=lambda x: x[0])

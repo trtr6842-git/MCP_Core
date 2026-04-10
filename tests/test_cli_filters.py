@@ -237,3 +237,34 @@ def test_grep_context_non_integer():
     output, code = run_filter('grep -A abc three', _CTX)
     assert code == 1
     assert '[error]' in output
+
+
+# --- multi-word grep patterns ---
+
+_MULTI = "text variable found here\nsingle line only\ntext only line\nno match here"
+
+
+def test_grep_multi_word_pattern():
+    """Quoted multi-word pattern matches only lines containing the exact phrase."""
+    output, code = run_filter('grep "text variable"', _MULTI)
+    assert code == 0
+    assert output == 'text variable found here'
+    assert 'text only line' not in output
+
+
+def test_grep_multi_word_case_insensitive():
+    """Multi-word pattern with -i flag performs case-insensitive match."""
+    output, code = run_filter('grep -i "Text Variable"', _MULTI)
+    assert code == 0
+    assert 'text variable found here' in output
+    assert 'text only line' not in output
+
+
+def test_grep_multi_word_with_after_context():
+    """Multi-word pattern with -A context returns match line plus N following lines."""
+    output, code = run_filter('grep -A 2 "text variable"', _MULTI)
+    assert code == 0
+    lines = output.split('\n')
+    assert 'text variable found here' in lines
+    assert 'single line only' in lines
+    assert 'text only line' in lines

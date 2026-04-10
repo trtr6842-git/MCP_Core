@@ -185,8 +185,13 @@ cython_debug/
 logs/*.jsonl
 logs/*.log
 
-# Local doc clones (large, fetch separately)
-docs_cache/
+# Transient files inside committed cache directories
+docs_cache/**/po/
+docs_cache/**/images/
+docs_cache/**/*.png
+docs_cache/**/*.jpg
+docs_cache/**/*.gif
+docs_cache/**/*.svg
 
 # MCP server runtime
 *.pid

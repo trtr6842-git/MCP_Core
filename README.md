@@ -2,6 +2,28 @@
 
 A Model Context Protocol (MCP) server for KiCad documentation, providing hardware engineers with CLI-style access to official KiCad documentation.
 
+## Prerequisites
+
+- Python 3.11+
+- Git LFS (`git lfs install`)
+
+This repository uses Git LFS to distribute documentation caches and
+embedding vectors. If you clone without LFS, the server will fail to
+start because the embedding cache files will be LFS pointer stubs
+instead of actual data.
+
+### First-time setup
+
+    git lfs install          # one-time per machine
+    git clone <repo-url>     # LFS files download automatically
+    cd MCP_Core
+    pip install -e .         # installs all dependencies
+
+### If you already cloned without LFS
+
+    git lfs install
+    git lfs pull             # downloads all LFS-tracked files
+
 ## Quick Start
 
 ### Setup

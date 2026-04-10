@@ -1,6 +1,6 @@
 """Tests for the CLI chain parser."""
 
-from kicad_mcp.cli.parser import Stage, parse_chain
+from kicad_mcp.cli.parser import Stage, parse_chain, tokenize_args
 
 
 def test_simple_command():
@@ -43,17 +43,17 @@ def test_seq_operator():
 
 
 def test_quoted_strings():
-    """Double-quoted strings preserve spaces as part of the command."""
+    """Double-quoted strings are preserved in stage command for downstream parsing."""
     stages = parse_chain('docs search "pad properties"')
     assert len(stages) == 1
-    assert stages[0].command == 'docs search pad properties'
+    assert stages[0].command == 'docs search "pad properties"'
 
 
 def test_single_quoted_strings():
-    """Single-quoted strings preserve spaces."""
+    """Single-quoted strings are preserved in stage command for downstream parsing."""
     stages = parse_chain("docs search 'pad properties'")
     assert len(stages) == 1
-    assert stages[0].command == 'docs search pad properties'
+    assert stages[0].command == "docs search 'pad properties'"
 
 
 def test_backslash_escapes():
@@ -94,3 +94,37 @@ def test_mixed_operators():
     assert stages[0].operator is None
     assert stages[1].operator == '|'
     assert stages[2].operator == '&&'
+
+
+# --- tokenize_args: quoted-string argument tokenization ---
+
+def test_tokenize_args_double_quoted_pattern():
+    """Double-quoted multi-word pattern becomes a single token."""
+    assert tokenize_args('grep "text variable"') == ['grep', 'text variable']
+
+
+def test_tokenize_args_flags_and_quoted_pattern():
+    """Flags before and after a quoted pattern are preserved as separate tokens."""
+    assert tokenize_args('grep -i "Board Setup" -A 3') == ['grep', '-i', 'Board Setup', '-A', '3']
+
+
+def test_tokenize_args_single_quoted_pattern():
+    """Single-quoted pattern becomes a single token."""
+    assert tokenize_args("grep 'single quotes work'") == ['grep', 'single quotes work']
+
+
+def test_tokenize_args_no_quotes():
+    """Unquoted arguments are split on whitespace as usual."""
+    assert tokenize_args('grep no_quotes') == ['grep', 'no_quotes']
+
+
+def test_tokenize_args_unmatched_quote():
+    """Unmatched quote does not crash — falls back to simple split."""
+    result = tokenize_args('grep "unmatched')
+    assert isinstance(result, list)
+    assert len(result) >= 1
+
+
+def test_tokenize_args_non_grep_command():
+    """Quote handling works for any command, not just grep."""
+    assert tokenize_args('docs search "Board Setup"') == ['docs', 'search', 'Board Setup']

@@ -7,6 +7,7 @@ Respects quoted strings (single and double) and backslash escapes.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 
 
@@ -70,9 +71,11 @@ def _tokenize(command: str) -> list[str]:
             i += 2
             continue
 
-        # Quoted strings: preserve content, strip quotes
+        # Quoted strings: preserve quotes in output so downstream parsers
+        # (shlex.split, tokenize_args) can correctly handle multi-word arguments.
         if ch in ('"', "'"):
             quote = ch
+            current.append(quote)  # keep opening quote
             i += 1
             while i < n and command[i] != quote:
                 if command[i] == '\\' and i + 1 < n:
@@ -82,7 +85,8 @@ def _tokenize(command: str) -> list[str]:
                     current.append(command[i])
                     i += 1
             if i < n:
-                i += 1  # skip closing quote
+                current.append(quote)  # keep closing quote
+                i += 1
             continue
 
         # || operator (check before single |)
@@ -118,3 +122,23 @@ def _tokenize(command: str) -> list[str]:
 
     flush()
     return tokens
+
+
+def tokenize_args(command: str) -> list[str]:
+    """
+    Split a command segment into argument tokens, respecting quoted strings.
+
+    Uses shlex.split so that quoted multi-word arguments are kept as single tokens
+    with the quotes stripped.  Falls back to simple whitespace split if the quotes
+    are unmatched (rather than raising).
+
+    Examples:
+        tokenize_args('grep "text variable"')      -> ['grep', 'text variable']
+        tokenize_args('grep -i "Board Setup" -A 3') -> ['grep', '-i', 'Board Setup', '-A', '3']
+        tokenize_args("grep 'single quotes work'") -> ['grep', 'single quotes work']
+        tokenize_args('grep no_quotes')             -> ['grep', 'no_quotes']
+    """
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()

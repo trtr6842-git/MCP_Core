@@ -63,6 +63,11 @@ class SentenceTransformerEmbedder:
     def dimensions(self) -> int:
         return self._resolved_dims
 
+    @property
+    def batch_size(self) -> int:
+        """Max texts per batch for CPU inference."""
+        return 32
+
     # ------------------------------------------------------------------
     # Embedding methods
     # ------------------------------------------------------------------

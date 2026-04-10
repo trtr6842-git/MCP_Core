@@ -215,7 +215,7 @@ class DocsCommandGroup(CommandGroup):
         versions_note = ""
         if len(self._indexes) > 1:
             available = ", ".join(sorted(self._indexes.keys()))
-            versions_note = f"\n  --version <v>    Query a specific version (available: {available})\n"
+            versions_note = f"\n  --version <v>    KiCad version to query (default: {self._default_version}, available: {available})\n"
         text = (
             "docs search — search KiCad documentation\n"
             "\n"
@@ -351,7 +351,7 @@ class DocsCommandGroup(CommandGroup):
         versions_note = ""
         if len(self._indexes) > 1:
             available = ", ".join(sorted(self._indexes.keys()))
-            versions_note = f"\n  --version <v>    Query a specific version (available: {available})\n"
+            versions_note = f"\n  --version <v>    KiCad version to query (default: {self._default_version}, available: {available})\n"
         text = (
             "docs read — read a documentation section\n"
             "\n"
@@ -451,7 +451,7 @@ class DocsCommandGroup(CommandGroup):
         versions_note = ""
         if len(self._indexes) > 1:
             available = ", ".join(sorted(self._indexes.keys()))
-            versions_note = f"\n  --version <v>    Query a specific version (available: {available})\n"
+            versions_note = f"\n  --version <v>    KiCad version to query (default: {self._default_version}, available: {available})\n"
         text = (
             "docs list — browse documentation structure\n"
             "\n"

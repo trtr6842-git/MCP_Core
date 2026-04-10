@@ -16,16 +16,22 @@ Third and fourth test sessions (post-Phase 2) validated semantic search
 quality and surfaced usability improvements: snippets, grep context,
 line-range navigation, and cross-references.
 
-## Current state (Phase 2 complete, deployment hardening in progress)
+Fifth test session (post-deployment hardening) — multi-hour version-comparison
+session. Confirmed search ranking quality and version comparison workflow.
+Identified multi-word grep failure, need for subsection navigation, and
+cross-version section name divergence as key issues.
+
+## Current state (deployment hardening complete, UX improvements in progress)
 
 The server runs with a single CLI-style tool `kicad(command: str)`. The
 `docs` command group provides `search`, `read`, and `list` subcommands.
 
 - **Multi-version:** KiCad 10.0 (default) and 9.0 (legacy), both loaded
   at startup with separate indexes. `--version 9` flag on all subcommands.
-- ~327 tests passing (as of 0041 completion)
-- CLI infrastructure: chain parser, command router, built-in filters
-  (grep/head/tail/wc), presentation layer with overflow and metadata
+- **385 tests passing** (0 skipped, 0 failures)
+- CLI infrastructure: chain parser (with quoted string support), command
+  router, built-in filters (grep/head/tail/wc), presentation layer with
+  overflow and metadata
 - Progressive help at 3 levels (tool description → subcommand list → usage)
 - Error-as-navigation on all commands with actionable suggestions
 - Search results include `read:` command, URL, and tiered content
@@ -34,22 +40,31 @@ The server runs with a single CLI-style tool `kicad(command: str)`. The
 - Doc source: env var → pinned cache → GitLab clone (with pin config)
 - Dual logging: INFO terminal + DEBUG rotating file + JSONL analytics
 - Server `--help` with env var documentation
+- **Cache-first startup:**
+  - Valid cache → load vectors, fast start (~7s)
+  - Cache miss + HTTP endpoint → rebuild via HttpEmbedder
+  - Cache miss + no endpoint → hard error with recovery instructions
+  - `--rebuild-cache` flag forces re-embedding via HTTP endpoint
+  - No CPU corpus embedding — CPU is query-time only
 - **Semantic search pipeline:**
   - Two-stage retrieve (Qwen3-Embedding-0.6B) + rerank (ms-marco-MiniLM)
-  - D2 prose-flush chunking: 680 chunks, p50=165 words, 11% under 50 words
+  - D2 prose-flush chunking: v10=895 chunks, v9=681 chunks
   - AsciiDoc-aware block detection with heading breadcrumb prefixes
   - Version-scoped embedding cache (`embedding_cache/{version}/{model}/`)
-  - Cache invalidation on: model, dimensions, corpus_hash, chunker_hash,
+  - Cache invalidation on 5 keys: model, dims, corpus_hash, chunker_hash,
     doc_ref (pinned commit SHA)
-  - Smart batching (sort by length, batch similar sizes, solo for 500+ words)
-  - Per-chunk progress bar during startup embedding
+  - Token-aware smart batching for HTTP endpoints (discovers context
+    window via `/v1/models`, batches to 75% of capacity)
+  - Per-chunk progress bar during embedding (works with both HTTP and CPU)
   - `--keyword` flag for exact substring fallback
-  - `--no-semantic` flag for fast debug starts (will be removed in 0042)
-  - `[semantic]` optional dependency group (will become core in 0042)
-  - **HTTP embedder** (`HttpEmbedder`) for GPU-accelerated embedding via
-    OpenAI-compatible endpoints (LM Studio, etc.) — implemented but not
-    yet wired into startup
+- **Dependencies:** `sentence-transformers`, `torch`, `numpy` are core deps
+  (no optional group, no `--no-semantic` flag)
+- **Git LFS:** `.gitattributes` tracks `embedding_cache/**` and `docs_cache/**`.
+  README and MAINTAINER docs cover LFS setup and cache rebuild.
+- **Version isolation:** `_INSTRUCTIONS` field hardened with no-mixing rule,
+  version primacy, disclosure requirement. `--version` help shows default.
 - **Navigation improvements:**
+  - Multi-word grep patterns: `grep "text variable"` works
   - `grep -E` for regex alternation
   - `grep -A/-B/-C` for context lines around matches
   - `docs read --lines START-END` for line-range access
@@ -103,7 +118,7 @@ All items delivered:
 | Tiered search content | 0035 | Full chunk for short, snippet for long |
 | Query-aware snippets | 0036 | Best-paragraph selection by query term overlap |
 
-### Deployment hardening (in progress)
+## Deployment hardening — COMPLETE
 
 | Step | Report | Summary |
 |------|--------|---------|
@@ -112,49 +127,75 @@ All items delivered:
 | Chunker hash invalidation | 0039 | SHA-256 of chunker source in cache key |
 | Pin doc source to git ref | 0040 | `config/doc_pins.toml`, `.doc_ref` file, cache validation |
 | HTTP embedder backend | 0041 | `HttpEmbedder`, endpoint probing, config file |
+| Startup rewrite | 0042 | Cache-first architecture, no `--no-semantic` |
+| Git LFS | 0043 | `.gitattributes`, `.gitignore`, README, MAINTAINER |
+| Version isolation | 0044 | `_INSTRUCTIONS` audit, `--version` help text |
+| HTTP progress fix | 0045 | Progress bar for HttpEmbedder, stale test fix |
+| Token-aware batching | 0046 | Context length discovery, token-budget batching |
+| Force cache rebuild | 0048 | `--rebuild-cache` CLI flag |
+
+## Post-hardening UX improvements — IN PROGRESS
+
+| Step | Report | Summary |
+|------|--------|---------|
+| Multi-word grep | 0049 | Parser preserves quotes, `tokenize_args()` canonical splitter |
+| Subsection exploration | 0050 | Data-only: 146 unparsed L4 headings, cross-version stats |
 
 ### Performance profile
 
-- **First-run embedding:** ~3.5 min on Ryzen 9 9900X (680 chunks, CPU)
+- **HTTP cache rebuild:** ~20s for 895 chunks via local GPU endpoint
+  (token-aware batching, ~8–9 HTTP requests)
 - **Cached restart:** ~7s (model load + vector cache load)
 - **Query latency:** ~550ms (embed ~50ms + similarity trivial + rerank ~15ms + overhead)
 - **Embedding cache:** ~2.7MB per version on disk
 
 ### Known limitations
 
-- 22 chunks over 1,000 words consume 26% of embedding time (~56s of 212s)
-- Query latency ~550ms is above the 200ms target — dominated by model
-  inference overhead, not algorithmic cost
-- Cross-reference resolution rate is 84% — multi-anchor headings in
-  doc_loader cause 16% of refs to be unresolvable
-- No inter-guide cross-references (prose like "see the PCB editor
-  documentation" is not parseable)
+- Query latency ~550ms exceeds 200ms target — dominated by model
+  inference overhead (HTTP endpoint helps for queries when available)
+- Cross-reference resolution is 84% — multi-anchor headings cause 16% unresolvable
+- No inter-guide cross-references (prose references not parseable)
+- 146 level-4 (`=====`) headings unparsed by doc_loader — concentrated in
+  the largest reference sections (Object property reference, DRC checks, etc.)
+- Metadata footer always shows primary version regardless of queried version
+- LM Studio GGUF model emits tokenizer SEP token warnings
 
-## Deployment hardening — REMAINING (0042–0044)
+## Phase 3 — Search quality + navigation (informed by 0050 exploration)
 
-- **0042 Startup rewrite** — cache-first architecture: valid committed
-  cache → use it; stale cache + HTTP endpoint → rebuild; stale + no
-  endpoint → hard error. HTTP embedder for runtime queries when available,
-  CPU fallback. Reranker always local. `sentence-transformers` moves to
-  core deps. `--no-semantic` removed.
-- **0043 Git LFS** — track `.npy` caches and `docs_cache/` via LFS,
-  update `.gitignore`/`.gitattributes`, document setup.
-- **0044 Version isolation messaging** — harden `_INSTRUCTIONS` field and
-  tool description to prevent LLM from mixing v9/v10 information.
+### High priority (from user feedback + 0050 data)
 
-## Phase 3 — Search quality + navigation
+- **Parse L4 (`=====`) headings** — extend `_HEADING_RE` from `={2,4}` to
+  `={2,5}`. 146 unparsed headings, concentrated in the 12 sections that
+  produce 4+ chunks. Would split "Object property and function reference"
+  (11 chunks) into ~5–8 addressable units. Biggest structural improvement
+  for retrieval precision.
+- **Case-fold fuzzy matching on read failures** — when section not found,
+  try case-insensitive match before erroring. Covers the v9→v10 systematic
+  case shift (Title Case → sentence case, 18 eeschema sections affected).
+  Show closest matches on failure.
+- **`--outline` flag on `docs read`** — return heading tree with line
+  numbers for a section. Enables precise `--lines` targeting within
+  large sections.
+- **Search result deduplication** — collapse multiple chunks from the same
+  section into one result. Assess after L4 parsing ships (may dissolve
+  the problem for the worst offenders).
 
-- **Corpus keyword index** — TF-IDF or similar, built at startup. Powers
-  keyword search via term importance rather than raw substring matching.
-- **Related term suggestions** — `docs search "pad"` suggests related terms
-  like `["padstack", "courtyard", "SMD", "through-hole"]` to help Claude
-  refine queries.
+### Medium priority
+
 - **Multi-anchor fix in doc_loader** — track all `[[anchor-id]]` lines
   before a heading, not just the last one. Would improve cross-ref
   resolution from 84% to ~95%+.
+- **Corpus keyword index** — TF-IDF or similar, built at startup. Powers
+  keyword search via term importance rather than raw substring matching.
+- **Related term suggestions** — `docs search "pad"` suggests related terms
+  like `["padstack", "courtyard", "SMD", "through-hole"]`.
+- **Guide hint in search footer** — when results span 3+ guides, append
+  `Tip: narrow with --guide <name>`.
+
+### Lower priority
+
 - **Langfuse observability** — tracing, retrieval quality monitoring,
-  query analysis at scale. Right timing: when multiple users are
-  generating real traffic in Stage 2 deployment.
+  query analysis at scale. Right timing: Stage 2 multi-user deployment.
 
 ## Phase 4 — Polish and future-proofing
 
