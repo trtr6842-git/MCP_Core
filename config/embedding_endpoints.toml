@@ -21,8 +21,8 @@
 #                       on search queries (e.g. Qwen3-Embedding variants).
 
 [[endpoints]]
-url = "http://localhost:8082"
-instruction_prefix = true  # Qwen3 instruction-aware query format
+#url = "http://localhost:8082"
+#instruction_prefix = true  # Qwen3 instruction-aware query format
 
 [[endpoints]]
 url = "http://192.168.0.153:8082"
@@ -31,7 +31,7 @@ instruction_prefix = true  # Qwen3 instruction-aware query format
 [[endpoints]]
 url = "http://127.0.0.1:1234"
 model = "text-embedding-qwen3-embedding-0.6b"
-context_length = 32768  # LM Studio doesn't report this via /v1/models
+context_length = 8192  # LM Studio doesn't report this via /v1/models
 instruction_prefix = true  # Qwen3 instruction-aware query format
 
 # url = "http://gpu-workstation.local:1234"
