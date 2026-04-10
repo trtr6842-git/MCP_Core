@@ -61,13 +61,14 @@ class MockCache:
     def corpus_hash(self, chunks) -> str:
         return "fake-hash"
 
-    def load(self, model_name: str, dimensions: int, corpus_hash: str):
-        self.load_calls.append((model_name, dimensions, corpus_hash))
+    def load(self, model_name: str, dimensions: int, corpus_hash: str, chunker_hash: str,
+             doc_ref: str):
+        self.load_calls.append((model_name, dimensions, corpus_hash, chunker_hash, doc_ref))
         return self._hit_data
 
-    def save(self, model_name: str, dimensions: int, corpus_hash: str,
-             embeddings, chunk_ids: list[str]) -> None:
-        self.save_calls.append((model_name, dimensions, corpus_hash, embeddings, chunk_ids))
+    def save(self, model_name: str, dimensions: int, corpus_hash: str, chunker_hash: str,
+             doc_ref: str, embeddings, chunk_ids: list[str]) -> None:
+        self.save_calls.append((model_name, dimensions, corpus_hash, chunker_hash, doc_ref, embeddings, chunk_ids))
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +253,7 @@ def test_build_cache_miss_calls_save(chunks, embedder):
     idx = VectorIndex()
     idx.build(chunks, embedder, cache=cache)
     assert len(cache.save_calls) == 1
-    _, _, _, _, saved_ids = cache.save_calls[0]
+    _, _, _, _, _, _, saved_ids = cache.save_calls[0]
     assert set(saved_ids) == {"A", "B", "C"}
 
 
@@ -321,7 +322,7 @@ def test_build_cache_load_is_called_with_model_info(chunks, embedder):
     idx = VectorIndex()
     idx.build(chunks, embedder, cache=cache)
     assert len(cache.load_calls) == 1
-    model_name, dimensions, _ = cache.load_calls[0]
+    model_name, dimensions, _, _, _ = cache.load_calls[0]
     assert model_name == "mock-model"
     assert dimensions == 3
 

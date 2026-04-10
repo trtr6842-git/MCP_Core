@@ -1,0 +1,13 @@
+# Pinned git refs for KiCad documentation sources.
+# Each version maps to a branch, tag, or commit SHA in the kicad-doc repo.
+# The maintainer updates these pins when upgrading doc versions.
+
+[versions]
+
+[versions."10.0"]
+ref = "10.0"
+# Once KiCad 10 has a stable tag, pin to exact commit:
+# ref = "abc1234def5678..."
+
+[versions."9.0"]
+ref = "9.0"

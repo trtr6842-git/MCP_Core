@@ -117,6 +117,8 @@ class VectorIndex:
         chunks: list,
         embedder,
         cache=None,
+        chunker_hash: str | None = None,
+        doc_ref: str | None = None,
     ) -> None:
         """Embed all chunks and populate the index.
 
@@ -128,6 +130,12 @@ class VectorIndex:
             chunks: The retrieval chunks to index.
             embedder: The embedding model to use (Embedder protocol).
             cache: Optional EmbeddingCache for fast restarts.
+            chunker_hash: SHA-256 hash of the chunker source files. Used as
+                part of the cache key so that algorithm changes invalidate
+                stale caches.
+            doc_ref: Commit SHA of the cloned doc repo. Used as part of the
+                cache key so that re-clones to a different commit invalidate
+                stale caches.
         """
         import numpy as np
 
@@ -140,7 +148,13 @@ class VectorIndex:
 
         if cache is not None:
             corpus_hash = cache.corpus_hash(chunks)
-            result = cache.load(embedder.model_name, embedder.dimensions, corpus_hash)
+            result = cache.load(
+                embedder.model_name,
+                embedder.dimensions,
+                corpus_hash,
+                chunker_hash or "",
+                doc_ref or "unknown",
+            )
             if result is not None:
                 embeddings_array, chunk_ids = result
                 chunk_map = {c.chunk_id: c for c in chunks}
@@ -203,6 +217,8 @@ class VectorIndex:
                 embedder.model_name,
                 embedder.dimensions,
                 corpus_hash,
+                chunker_hash or "",
+                doc_ref or "unknown",
                 self._embeddings,
                 [c.chunk_id for c in self._chunks],
             )

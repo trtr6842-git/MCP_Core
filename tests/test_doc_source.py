@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kicad_mcp.doc_source import resolve_doc_path, _clone_doc_repo
+from kicad_mcp.doc_source import resolve_doc_path, _clone_doc_repo, get_doc_ref
 
 
 class TestResolveDocPathEnvVar:
@@ -151,25 +151,50 @@ class TestCloneDocRepo:
     def test_clone_command_format(self, tmp_path, monkeypatch):
         """Clone uses correct git command with shallow clone."""
         cache_dir = tmp_path / "cache" / "9.0"
-        captured_cmd = []
+        captured_cmds = []
 
         def capture_run(cmd, **kwargs):
-            captured_cmd.append(cmd)
+            captured_cmds.append(cmd)
             result = MagicMock()
             result.returncode = 0
+            result.stdout = ""  # empty SHA → no .doc_ref written
             return result
 
         with patch("kicad_mcp.doc_source.subprocess.run", side_effect=capture_run):
             _clone_doc_repo("master", cache_dir)
 
-        # Verify command structure
-        assert len(captured_cmd) == 1
-        cmd = captured_cmd[0]
-        assert "git" in cmd
-        assert "clone" in cmd
-        assert "--branch" in cmd
-        assert "master" in cmd
-        assert "--depth" in cmd
-        assert "1" in cmd
-        assert "https://gitlab.com/kicad/services/kicad-doc.git" in cmd
-        assert str(cache_dir) in cmd
+        # First call is the git clone; second is rev-parse HEAD for SHA recording
+        clone_cmd = captured_cmds[0]
+        assert "git" in clone_cmd
+        assert "clone" in clone_cmd
+        assert "--branch" in clone_cmd
+        assert "master" in clone_cmd
+        assert "--depth" in clone_cmd
+        assert "1" in clone_cmd
+        assert "https://gitlab.com/kicad/services/kicad-doc.git" in clone_cmd
+        assert str(cache_dir) in clone_cmd
+
+
+class TestGetDocRef:
+    """Test get_doc_ref() reads the .doc_ref file correctly."""
+
+    def test_reads_doc_ref_file(self, tmp_path):
+        """Returns the SHA stored in .doc_ref."""
+        sha = "abc1234def5678901234567890abcdef1234567890abcdef1234567890abcdef"
+        (tmp_path / ".doc_ref").write_text(sha, encoding="utf-8")
+        assert get_doc_ref(tmp_path) == sha
+
+    def test_strips_trailing_newline(self, tmp_path):
+        """SHA with trailing newline is trimmed."""
+        sha = "abc1234def5678901234567890abcdef1234567890abcdef1234567890abcdef"
+        (tmp_path / ".doc_ref").write_text(sha + "\n", encoding="utf-8")
+        assert get_doc_ref(tmp_path) == sha
+
+    def test_returns_none_when_file_missing(self, tmp_path):
+        """Returns None when the .doc_ref file doesn't exist."""
+        assert get_doc_ref(tmp_path) is None
+
+    def test_returns_none_when_file_empty(self, tmp_path):
+        """Returns None when the .doc_ref file is empty."""
+        (tmp_path / ".doc_ref").write_text("", encoding="utf-8")
+        assert get_doc_ref(tmp_path) is None

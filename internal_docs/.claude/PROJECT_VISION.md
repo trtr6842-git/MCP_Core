@@ -74,11 +74,13 @@ how they compose them.
 - The `instructions` field tells Claude to distrust training knowledge and
   always use the tools
 - Every tool result is stamped with KiCad version and source URL via
-  metadata footer: `[kicad-docs 9.0 | N results | Xms]`
-- Tool description names the target version explicitly
+  metadata footer: `[kicad-docs 10.0 | N results | Xms]`
+- Tool description names both versions explicitly
 - Multiple doc versions coexist additively (adding v10 doesn't remove v9)
-- Default to newest version unless the user specifies otherwise
-- Currently serving KiCad 9.0 stable; will move to 10.0.x when stable
+- Default to newest version (10.0); legacy accessible via `--version 9`
+- Instructions field explicitly prohibits mixing version information
+- Currently serving KiCad 10.0 (default) and 9.0 (legacy comparison)
+- Future: detect version from user's installed KiCad
 
 ## Doc source and fetching
 
@@ -86,18 +88,23 @@ Official KiCad docs from `gitlab.com/kicad/services/kicad-doc`. AsciiDoc
 source files read directly — no build step needed. Section structure extracted
 from heading hierarchy (`==`, `===`, `====`) and explicit `[[anchor-id]]` tags.
 
-**No persistent data store required.** The server fetches and parses docs at
-startup. This keeps CI/CD deployment simple — deploy the server code, it
-handles its own data.
+Doc sources are **pinned to specific git refs** via `config/doc_pins.toml`.
+Each version maps to a branch, tag, or commit SHA. After cloning, the actual
+HEAD commit SHA is recorded in a `.doc_ref` file in the cache directory.
 
 Startup behavior (implemented in `doc_source.py`):
 - If `KICAD_DOC_PATH` is set and points to an existing directory, use it
-  directly (local dev with a pre-existing clone — fast restarts for testing)
+  directly (primary version only — local dev with a pre-existing clone)
 - If not set, check `docs_cache/{version}/` for a previous clone. Reuse if
-  `src/` subdirectory exists.
-- If cache is empty, clone from GitLab with `--branch {version} --depth 1`
-  (shallow clone, ~15MB). Cache persists across restarts.
-- The server is self-sufficient — no environment variables required to start.
+  `src/` subdirectory exists and pin ref matches.
+- If cache is empty or stale, clone from GitLab using the pinned ref with
+  `--depth 1` (shallow clone, ~15MB). Cache persists across restarts.
+- Legacy version always uses `docs_cache/` (ignores KICAD_DOC_PATH)
+
+**Deployment model:** Doc source trees and embedding caches are distributed
+via Git LFS. End users clone the repo and have everything needed to start.
+The maintainer updates docs by bumping the pin in `doc_pins.toml`, cloning,
+rebuilding embeddings, and committing the new files.
 
 URL generation to official docs is deterministic:
 `https://docs.kicad.org/{version}/en/{guide}/{guide}.html#{anchor}`
@@ -105,13 +112,9 @@ URL generation to official docs is deterministic:
 - Auto-generated anchors: lowercase, underscores for spaces, no prefix
 - Verified against live site
 
-Total corpus: 578 sections across 9 guides on the 9.0 branch.
-
 ## Semantic search
 
-Day zero ships with keyword search (case-insensitive substring matching).
-Phase 2 adds two-stage semantic search: embedding retrieval + cross-encoder
-reranking.
+Two-stage semantic search: embedding retrieval + cross-encoder reranking.
 
 ### Search pipeline
 
@@ -144,25 +147,36 @@ that scores via yes/no token probabilities, not a sequence-classification
 model. CrossEncoder adds a randomly initialized classification head,
 producing meaningless scores.
 
-**Inference backend:** `sentence-transformers` (SentenceTransformer for
-embeddings, CrossEncoder for reranking). Chosen over `fastembed` and
-`qwen3-embed` for model-swapping flexibility — any HuggingFace model works
-by changing a string. Pulls in PyTorch as a dependency (~2GB installed),
-available as optional `[semantic]` extra in pyproject.toml.
+### Inference backends
+
+**Local CPU (always available):**
+`sentence-transformers` (SentenceTransformer for embeddings, CrossEncoder
+for reranking). Core dependency — every user has it for query-time inference.
+Pulls in PyTorch (~2GB installed).
+
+**HTTP GPU (when available):**
+`HttpEmbedder` calls OpenAI-compatible `/v1/embeddings` endpoints (LM Studio,
+etc.) over HTTP. Configured via `config/embedding_endpoints.toml`. Used for:
+- Cache rebuilds (batch corpus embedding — GPU only, no CPU option)
+- Runtime query embedding (faster than local CPU when endpoint is on LAN)
+
+At startup, configured endpoints are probed. If reachable, HTTP is preferred
+for query embedding. If not, CPU fallback is used transparently.
+
+Reranking is always local (cross-encoder inference is fast enough on CPU
+at ~15ms for 20 candidates).
 
 ### Protocols (swappable)
 
 **Embedder protocol** — callable: list of strings → list of vectors.
-`DocIndex` calls `self.embedder.embed()` and never knows which backend is
-running. Initial implementation: `SentenceTransformerEmbedder`. Future:
-HTTP client calling a local GPU server endpoint, cloud embedding API.
+`DocIndex` calls `self.embedder.embed()` / `.embed_query()` and never knows
+which backend is running. Implementations: `SentenceTransformerEmbedder`
+(CPU), `HttpEmbedder` (HTTP/GPU).
 
 **Reranker protocol** — callable: (query, list of candidates) → list of
-scored results. Initial implementation: `SentenceTransformerReranker`.
+scored results. Implementation: `SentenceTransformerReranker` (CPU only).
 
-Both protocols are lazy-imported — `sentence-transformers` and PyTorch
-are imported inside `__init__`, not at module level, so the existing test
-suite and `--no-semantic` mode stay fast.
+Both protocols lazy-import their dependencies.
 
 ### Chunking strategy
 
@@ -177,90 +191,75 @@ a buffer and flushed only when new prose appears after a non-prose block.
 This keeps code examples and tables attached to the prose that introduces
 them, splitting only when the topic genuinely shifts.
 
-The D2 strategy was selected after benchmarking 5 strategies (blank-line
-paragraph splitting, block+list+blanks, strong boundaries, block-only,
-and section-level). D2 produces the best distribution for embedding:
-~681 chunks, p50 at 165 words, only 11% under 50 words. Every chunk
-carries a `section_path` back-reference so search results link to
-navigable sections. No data is ever truncated or lost.
+The D2 strategy was selected after benchmarking 5 strategies. D2 produces
+the best distribution for embedding: ~681 chunks, p50 at 165 words, only
+11% under 50 words. Every chunk carries a `section_path` back-reference so
+search results link to navigable sections. No data is ever truncated or lost.
 
 **Chunker protocol remains open.** `HeadingChunker`, `ParagraphChunker`,
-and `AsciiDocChunker` all implement the same `Chunker` protocol. Future
-strategies (hierarchical embedding, sliding windows) can be added without
-changing the navigation layer or the pipeline.
+and `AsciiDocChunker` all implement the same `Chunker` protocol.
 
 **No truncation, ever.** Chunks are emitted at their natural size.
-`max_seq_length` is not capped. The chunking strategy ensures most chunks
-are short enough for fast embedding; the ~22 large chunks (>1,000 words)
-are accepted as-is — the reranker sees full text regardless.
 
 ### Embedding cache
 
-Pre-computed vectors saved as files (numpy `.npy` + metadata JSON), keyed
-by model name + corpus hash. Invalidates automatically when the model or
-corpus changes. Speeds up local dev restarts without adding a database
-dependency.
+Pre-computed vectors saved as files (numpy `.npy` + metadata JSON).
+Version-scoped directories: `embedding_cache/{version}/{model}_{dims}/`.
 
-**Local dev:** Cache persists across restarts. Code changes → ~7 second
-restart (model load + cached vectors). Corpus/model changes → re-embed
-(~4–5 min on CPU).
+**Cache invalidation keys:**
+- `model_name` + `dimensions` — embedding model identity
+- `corpus_hash` — SHA-256 of all chunk IDs + text content
+- `chunker_hash` — SHA-256 of chunker source code (auto-detects changes)
+- `doc_ref` — pinned commit SHA of the doc source
 
-**CI/CD:** Fresh rebuild each deployment (no persistent store for now).
-Future option: bake embeddings into Docker image at build time.
+All five must match for a cache hit.
+
+**Deployment model:** Pre-built caches are committed to git (via LFS) and
+distributed with the repo. End users load the cache at startup — no local
+embedding required. The maintainer rebuilds caches using a GPU endpoint
+when docs or chunking changes.
+
+**Rebuild flow (maintainer only):**
+1. Bump pin in `config/doc_pins.toml` (or change chunker code)
+2. Start server with HTTP embedding endpoint configured
+3. Server detects cache miss → rebuilds via GPU endpoint → saves to disk
+4. Commit updated cache files to git
 
 ### Memory and latency budget
 
 - **Embedding model in memory:** ~1.2GB (PyTorch CPU, float32)
 - **Reranker model in memory:** ~22MB (MiniLM)
-- **Vector index:** ~2.7MB (~681 × 1024 float32)
-- **Total:** ~1.3GB — reasonable for company server hardware
-- **Query latency target:** <200ms (embed query ~5–10ms, cosine similarity
-  trivial, rerank 20 candidates ~12–22ms on CPU)
-- **Startup (first run):** Model download ~1.2GB one-time + embed corpus
-  ~4–5 min on CPU
-- **Startup (cached):** Model load + vector load → ~7 seconds
+- **Vector index:** ~2.7MB per version (~681 × 1024 float32)
+- **Total:** ~1.3GB — reasonable for company hardware
+- **Query latency target:** <200ms
+- **Startup (cached, all users):** Model load + vector load → ~7 seconds
+- **Startup (cache rebuild, maintainer):** Model load + GPU embed → varies
 
 ### Quality over speed tradeoff
 
 The server sees <20 concurrent users and low request volume. Happily trade
-an order of magnitude in speed for 2× better retrieval quality. Startup
-cost is acceptable. Query latency up to 200ms is invisible next to Claude's
-inference time.
+an order of magnitude in speed for 2× better retrieval quality.
 
 ### Search result presentation
 
 Search results follow the Manus controlled-context principle — return
 enough for Claude to decide what to read, without flooding context.
 
-**Tiered output by chunk size:** Short chunks (under 200 words) are
-returned in full inline — Claude can often answer directly without a
-`docs read` follow-up. Long chunks (200+ words) get a query-aware
-snippet: the paragraph within the chunk with the highest query-term
-overlap, truncated to 300 characters. This replaces naive first-300-chars
-truncation.
+**Tiered output by chunk size:** Short chunks (under 200 words) returned
+in full inline. Long chunks (200+ words) get a query-aware snippet.
 
 **Search interface:** Semantic search is the default. `--keyword` flag
-forces exact substring matching:
-
-```
-kicad docs search "copper pour"              → semantic (default)
-kicad docs search "copper pour" --keyword    → exact substring
-```
-
-When semantic search is unavailable (sentence-transformers not installed,
-or `--no-semantic` flag), search falls back to keyword mode silently.
+forces exact substring matching.
 
 ### Navigation aids
 
 **Cross-references:** `docs read` output includes a "Related:" block
 listing intra-guide cross-references extracted from `<<anchor-id>>`
 patterns in the AsciiDoc source. 349 resolved refs across 156 sections
-(84% resolution rate). Claude can follow these directly without
-additional searches.
+(84% resolution rate).
 
-**Grep enhancements:** `-E` for regex alternation (`grep -E "design|class"`),
-`-A/-B/-C` for context lines around matches. Grep operates on the full
-search output including inline chunk content and snippets.
+**Grep enhancements:** `-E` for regex alternation, `-A/-B/-C` for context
+lines around matches.
 
 **Line-range access:** `docs read path --lines 50-100` for precise
 navigation within long sections.
@@ -269,9 +268,9 @@ navigation within long sections.
 
 - Entirely Python, async from day one
 - HTTP (Streamable HTTP) transport only — even locally
-- No persistent data store — docs fetched/parsed at startup
-- Embedding cache is a performance optimization, not a requirement
-- Configuration via environment variables (all optional, sensible defaults)
+- Embedding cache distributed via Git LFS — required for startup
+- `sentence-transformers` is a core dependency (query-time inference)
+- Configuration via environment variables + TOML config files
 - Local development must be near-identical to deployed server
 - Single MCP server — all command groups share one process, one transport,
   one logging pipeline
@@ -308,12 +307,13 @@ to "anonymous".
 
 **Day zero** — single machine, localhost:8080, one engineer testing
 
-**Stage 1** — same code, multiple engineers running local instances, shared doc
-corpus via git
+**Stage 1 (current)** — same code, multiple engineers running local
+instances. Doc sources and embedding caches distributed via Git LFS.
+Each user clones the repo, installs dependencies, and starts the server.
+No network calls needed at startup (all data is in the repo).
 
 **Stage 2** — central server on LAN/VPN, pushed Claude Desktop/Code configs
-with templated usernames, GitLab CI/CD. No persistent store needed — server
-clones docs on startup.
+with templated usernames, GitLab CI/CD.
 
 **Stage 3 (deferred)** — TLS, OAuth, Anthropic IP allowlisting for web/mobile.
 Infrastructure changes only, no server code changes. Left open by using
@@ -325,8 +325,8 @@ The `kicad` namespace is open for future command groups. The CLI
 infrastructure (chain parser, command router, built-in filters, presentation
 layer) is generic and serves any command group without modification.
 
-We do not speculate about or pre-build for specific future groups. They are
-registered into the router when they are developed.
+- Auto-detect user's installed KiCad version → select matching doc index
+- Version comparison tool (show what changed between versions)
 
 ## What the buddy program is (and isn't)
 

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:\\\\Users\\\\ttyle\\\\Python\\\\MCP_Core\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/ -v)",
+      "Bash(python -c \"import httpx; print\\(httpx.__version__\\)\")"
+    ]
+  }
+}

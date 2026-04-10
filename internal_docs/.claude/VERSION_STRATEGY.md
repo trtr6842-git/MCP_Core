@@ -30,21 +30,23 @@ The `instructions` field on the FastMCP server tells Claude directly:
 - ALWAYS use the tools first
 - When tool results conflict with training, TRUST THE TOOLS
 - State which version your answer applies to
+- NEVER combine information from different versions in a single answer
 
 Exact wording in `server.py`. This shapes every answer Claude gives while
 the server is active.
 
 ### Layer 2: Tool description
 
-The tool description includes the target version explicitly via post-
-definition interpolation: `VERSION: KiCad {version}`. The workflow
-examples and the `--help` text reinforce version awareness.
+The tool description includes both versions explicitly:
+`VERSION: KiCad 10.0 (default) | KiCad 9.0 (--version 9)`. The workflow
+examples and the `--help` text reinforce version awareness. The legacy
+version is presented as opt-in for explicit comparison only.
 
 ### Layer 3: Version-stamped results
 
 Every tool result includes a metadata footer:
 ```
-[kicad-docs 9.0 | N results | Xms]
+[kicad-docs 10.0 | N results | Xms]
 ```
 
 Plus every search hit and read result includes the version-specific URL
@@ -74,14 +76,18 @@ The user is the final check. Version-aware engineers will notice wrong menu
 paths or missing features. New users (especially Altium migrants) are most
 vulnerable because they can't distinguish v7 from v10 advice.
 
-## Multiple version support
+## Multiple version support (implemented)
 
-- Doc corpora are tagged by version and loaded additively
-- Adding v10 docs does not remove v9
-- Search defaults to newest version unless user specifies otherwise
-- Currently serving 9.0 stable; will move to 10.0.x when stable
-- Future: detect version from KiCad project files or IPC API
-- Future: version comparison tool (show what changed between versions)
+- KiCad 10.0 is the default version, KiCad 9.0 is loaded as legacy
+- Both indexes loaded at startup; embedder and reranker are shared
+  (stateless at inference time)
+- `--version 9` flag on all `docs` subcommands (search, read, list)
+- Vector stores are completely separate per version — version-scoped
+  cache directories (`embedding_cache/{version}/{model}/`)
+- Version shorthand accepted: `--version 9` → `9.0`, `--version 10` → `10.0`
+- Adding a version never removes another; the `indexes` dict is additive
+- Instructions field explicitly warns against mixing version information
+- Future: detect version from user's installed KiCad
 
 ## Version in URLs
 
@@ -89,6 +95,26 @@ URL generation is deterministic and verified against the live site:
 `https://docs.kicad.org/{version}/en/{guide}/{guide}.html#{anchor}`
 
 The `version` in the URL must match the `version` in the result metadata.
-Inconsistency here undermines trust. The version comes from
-`KICAD_DOC_VERSION` env var (default "9.0") and flows through the entire
-pipeline via `doc_source.py` → `DocIndex` → presentation layer.
+Inconsistency here undermines trust. The version flows through the pipeline
+per-index: each `DocIndex` holds its own version string, and every section
+carries the version from its parent index.
+
+## Doc source pinning
+
+Doc sources are pinned to specific git refs via `config/doc_pins.toml`.
+Each version maps to a branch, tag, or commit SHA. After cloning, the
+actual HEAD commit SHA is recorded in a `.doc_ref` file in the cache
+directory. The embedding cache validates against this ref — if the pin
+changes, the cache auto-invalidates.
+
+## Embedding cache invalidation
+
+The cache validates on five fields:
+- `model_name` — embedding model identity
+- `dimensions` — vector dimensions
+- `corpus_hash` — SHA-256 of chunk IDs + text content
+- `chunker_hash` — SHA-256 of chunker source code (auto-detects algorithm changes)
+- `doc_ref` — pinned commit SHA of the doc source
+
+All five must match for a cache hit. Any mismatch → cache miss → rebuild
+required (via HTTP embedding endpoint).

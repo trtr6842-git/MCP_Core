@@ -2,16 +2,31 @@
 Embedding cache — saves pre-computed vectors to disk and reloads them
 on subsequent starts.
 
-Cache layout (one subdirectory per model+dimension combo):
+Cache layout (one subdirectory per version + model+dimension combo):
 
     embedding_cache/
-        Qwen--Qwen3-Embedding-0.6B_1024/
-            embeddings.npy      — float32 array (N, dims)
-            metadata.json       — model_name, dimensions, corpus_hash,
-                                  chunk_ids, chunk_count, created_at
+        10.0/
+            Qwen--Qwen3-Embedding-0.6B_1024/
+                embeddings.npy      — float32 array (N, dims)
+                metadata.json       — model_name, dimensions, version,
+                                      doc_ref, corpus_hash, chunker_hash,
+                                      chunk_ids, chunk_count, created_at
+        9.0/
+            Qwen--Qwen3-Embedding-0.6B_1024/
+                embeddings.npy
+                metadata.json
 
-Cache is invalidated automatically when model name, dimensions, or
-corpus content changes (corpus_hash changes).
+Cache is invalidated automatically when model name, dimensions, doc commit
+SHA (doc_ref), corpus content (corpus_hash), or chunking algorithm
+(chunker_hash) changes.
+
+Backward compatibility: caches written before doc_ref was introduced lack
+the "doc_ref" field in metadata.json. These are treated as cache misses so
+they rebuild once with the new metadata schema.
+
+Note: old flat caches at embedding_cache/Qwen--Qwen3-Embedding-0.6B_1024/
+(without a version prefix) are abandoned — they will simply be cache misses
+since the subdirectory path changed.
 """
 
 from __future__ import annotations
@@ -25,9 +40,31 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def compute_chunker_hash() -> str:
+    """Compute a SHA-256 hash of the chunker source files.
+
+    Reads asciidoc_chunker.py and chunker.py from the same semantic/ package
+    directory as this file. Files are sorted alphabetically before hashing so
+    the result is deterministic regardless of iteration order.
+
+    When the chunking algorithm changes, the hash changes automatically and the
+    cache is invalidated on the next run.
+    """
+    semantic_dir = Path(__file__).resolve().parent
+    source_files = sorted([
+        semantic_dir / "asciidoc_chunker.py",
+        semantic_dir / "chunker.py",
+    ])
+    h = hashlib.sha256()
+    for path in source_files:
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
 class EmbeddingCache:
-    def __init__(self, cache_dir: Path) -> None:
+    def __init__(self, cache_dir: Path, version: str) -> None:
         self.cache_dir = cache_dir
+        self.version = version
 
     # ------------------------------------------------------------------
     # Public interface
@@ -47,11 +84,16 @@ class EmbeddingCache:
         return h.hexdigest()
 
     def load(
-        self, model_name: str, dimensions: int, corpus_hash: str
+        self, model_name: str, dimensions: int, corpus_hash: str, chunker_hash: str, doc_ref: str
     ) -> "tuple | None":
         """Load cached embeddings if they exist and match.
 
         Returns (embeddings_array, chunk_ids) on cache hit, None on miss.
+
+        A miss is returned when any of model_name, dimensions, doc_ref,
+        corpus_hash, or chunker_hash don't match the stored metadata.
+        Caches written before doc_ref was introduced (no "doc_ref" key) are
+        always treated as misses so they rebuild with the updated schema.
         """
         import numpy as np  # noqa: PLC0415 — lazy import
 
@@ -72,6 +114,8 @@ class EmbeddingCache:
 
         if (
             meta.get("corpus_hash") != corpus_hash
+            or meta.get("chunker_hash") != chunker_hash
+            or meta.get("doc_ref") != doc_ref
             or meta.get("model_name") != model_name
             or meta.get("dimensions") != dimensions
         ):
@@ -98,6 +142,8 @@ class EmbeddingCache:
         model_name: str,
         dimensions: int,
         corpus_hash: str,
+        chunker_hash: str,
+        doc_ref: str,
         embeddings: "object",
         chunk_ids: list[str],
     ) -> None:
@@ -115,7 +161,10 @@ class EmbeddingCache:
         meta = {
             "model_name": model_name,
             "dimensions": dimensions,
+            "version": self.version,
+            "doc_ref": doc_ref,
             "corpus_hash": corpus_hash,
+            "chunker_hash": chunker_hash,
             "chunk_ids": chunk_ids,
             "chunk_count": len(chunk_ids),
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -133,4 +182,4 @@ class EmbeddingCache:
 
     def _subdir(self, model_name: str, dimensions: int) -> Path:
         safe_model = model_name.replace("/", "--")
-        return self.cache_dir / f"{safe_model}_{dimensions}"
+        return self.cache_dir / self.version / f"{safe_model}_{dimensions}"

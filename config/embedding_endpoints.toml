@@ -1,0 +1,17 @@
+# HTTP embedding endpoints (OpenAI-compatible /v1/embeddings).
+#
+# Used for two purposes:
+#   1. Cache rebuilds — batch-embed all chunks via GPU (maintainer workflow)
+#   2. Runtime queries — faster query embedding when available
+#
+# If no endpoints are configured or reachable, the server falls back to
+# local sentence-transformers on CPU for query embedding. Cache rebuilds
+# require at least one working endpoint.
+#
+# Endpoints may be local (localhost) or on LAN.
+
+# [[endpoints]]
+# url = "http://localhost:1234"
+
+# [[endpoints]]
+# url = "http://gpu-workstation.local:1234"

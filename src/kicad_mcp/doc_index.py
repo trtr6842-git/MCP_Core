@@ -74,6 +74,7 @@ class DocIndex:
         reranker: Reranker | None = None,
         chunker: Chunker | None = None,
         cache: EmbeddingCache | None = None,
+        doc_ref: str | None = None,
     ) -> None:
         """
         Load all guides from the doc repo.
@@ -88,6 +89,9 @@ class DocIndex:
             chunker: Optional Chunker. Defaults to HeadingChunker() if None and
                 embedder is provided.
             cache: Optional EmbeddingCache for persisting computed embeddings.
+            doc_ref: Commit SHA of the cloned doc repo (from .doc_ref file).
+                Used as part of the cache key. Pass None if unavailable
+                (e.g., KICAD_DOC_PATH override); "unknown" is used as fallback.
         """
         doc_root = Path(doc_root)
         self._version = version
@@ -129,6 +133,7 @@ class DocIndex:
         # --- Semantic search setup ---
         if embedder is not None:
             from kicad_mcp.semantic.vector_index import VectorIndex
+            from kicad_mcp.semantic.embedding_cache import compute_chunker_hash
 
             if chunker is None:
                 from kicad_mcp.semantic.asciidoc_chunker import AsciiDocChunker
@@ -146,19 +151,24 @@ class DocIndex:
                 f"({time.perf_counter() - _t_chunk:.2f}s)"
             )
 
+            # Compute chunker hash once — used for both cache check and build
+            _chunker_hash = compute_chunker_hash()
+            _doc_ref = doc_ref or "unknown"
+
             # Embedding phase — detect cache hit/miss before build
             vi = VectorIndex()
             _is_cache_hit = False
             if cache is not None:
                 _corpus_hash = cache.corpus_hash(all_chunks)
                 _cache_result = cache.load(
-                    embedder.model_name, embedder.dimensions, _corpus_hash
+                    embedder.model_name, embedder.dimensions, _corpus_hash,
+                    _chunker_hash, _doc_ref
                 )
                 _is_cache_hit = _cache_result is not None
 
             if _is_cache_hit:
                 _t_embed = time.perf_counter()
-                vi.build(all_chunks, embedder, cache)
+                vi.build(all_chunks, embedder, cache, chunker_hash=_chunker_hash, doc_ref=_doc_ref)
                 print(
                     f"[KiCad MCP] Embedding cache hit — loading vectors "
                     f"({time.perf_counter() - _t_embed:.2f}s)"
@@ -167,7 +177,7 @@ class DocIndex:
                 print(f"[KiCad MCP] Embedding {len(all_chunks)} chunks...")
                 embedder._show_build_progress = True  # type: ignore[attr-defined]
                 _t_embed = time.perf_counter()
-                vi.build(all_chunks, embedder, cache)
+                vi.build(all_chunks, embedder, cache, chunker_hash=_chunker_hash, doc_ref=_doc_ref)
                 print(f"[KiCad MCP] Embedding complete ({time.perf_counter() - _t_embed:.1f}s)")
                 if cache is not None:
                     print(f"[KiCad MCP] Embeddings cached to {cache.cache_dir}/")

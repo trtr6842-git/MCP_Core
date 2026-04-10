@@ -57,6 +57,13 @@ Then read the worker reports for implementation history.
 - `internal_docs/.claude/reports/REPORT_0035_Tiered_Search_Content.md` — full content for short, snippet for long
 - `internal_docs/.claude/reports/REPORT_0036_Query_Aware_Snippets.md` — best paragraph by query term overlap
 
+**Deployment hardening (in progress — 0037-0041 complete, 0042-0044 remaining):**
+- `internal_docs/.claude/reports/REPORT_0037_MultiVersion_V10_Default.md` — v10 default, v9 legacy, --version flag
+- `internal_docs/.claude/reports/REPORT_0038_Version_Scoped_Cache.md` — embedding_cache/{version}/{model}/
+- `internal_docs/.claude/reports/REPORT_0039_Chunker_Hash_Cache.md` — chunker source hash in cache key
+- `internal_docs/.claude/reports/REPORT_0040_Pin_Doc_Source.md` — doc_pins.toml, .doc_ref, cache validation
+- `internal_docs/.claude/reports/REPORT_0041_HTTP_Embedder.md` — HttpEmbedder, endpoint probing, config
+
 **Original scaffold (read only if you need deep history):**
 - `internal_docs/.claude/reports/REPORT_0001_Project_Scaffold.md`
 - `internal_docs/.claude/reports/REPORT_0002_Implement_URLBuilder_DocLoader.md`
@@ -65,78 +72,116 @@ Then read the worker reports for implementation history.
 
 ## Current state
 
-Phase 1 and Phase 2 are complete. The server is running and functional
-with semantic search.
+Phase 1 and Phase 2 are complete. Deployment hardening is partially complete
+(0037–0041 done, 0042–0044 remaining).
 
 - **Single MCP tool:** `kicad(command: str)` with CLI-style interface
 - **`docs` command group:** `search`, `read`, `list` subcommands
-- **578 sections across 9 guides** from the KiCad 9.0 branch
-- **~280 tests passing**
+- **Multi-version:** KiCad 10.0 (default) + KiCad 9.0 (legacy via `--version 9`)
+- **~327 tests passing** (18 skipped, 3 pre-existing failures in test_doc_loader)
 - **Semantic search pipeline:**
   - Qwen3-Embedding-0.6B (1024 dims, instruction-aware)
   - cross-encoder/ms-marco-MiniLM-L-6-v2 (22MB reranker)
   - D2 prose-flush chunking: 680 chunks, p50=165 words, 11% under 50 words
   - AsciiDoc block-aware with `[guide > section]` breadcrumb prefixes
-  - Embedding cache (.npy + metadata JSON, auto-invalidating)
-  - Smart batching (sort by length, batch similar sizes, solo for 500+ words)
-  - Per-chunk progress bar during startup embedding
-  - Tiered search output (full content <200w, query-aware snippet ≥200w)
+  - **Version-scoped embedding cache** (`embedding_cache/{version}/{model}/`)
+  - Cache invalidation on 5 keys: model, dims, corpus_hash, chunker_hash, doc_ref
+  - **Doc source pinning** via `config/doc_pins.toml` with `.doc_ref` tracking
+  - **HTTP embedder** (`HttpEmbedder`) for OpenAI-compatible endpoints — implemented
+    but not yet wired into startup (that's 0042)
+  - Smart batching, per-chunk progress bar
+  - Tiered search output, query-aware snippets
   - `--keyword` flag for exact substring fallback
-  - `--no-semantic` for fast debug starts
-  - Optional `[semantic]` dependency group in pyproject.toml
+  - `--no-semantic` flag (will be removed in 0042)
+  - Optional `[semantic]` extras (will become core deps in 0042)
 - **Navigation:** grep -E/-A/-B/-C, docs read --lines, 349 cross-refs
-- **Performance:** ~3.5 min first-run embed (CPU), ~7s cached restart,
-  ~550ms query latency
-- **Two test sessions with Claude Desktop** — positive feedback, search
-  quality described as "strong," core workflow "intuitive"
+- **Config files:**
+  - `config/settings.py` — env var defaults (versions, ports, paths)
+  - `config/doc_pins.toml` + `config/doc_pins.py` — pinned git refs per version
+  - `config/embedding_endpoints.toml` + `config/embedding_endpoints.py` — HTTP endpoints
 
-## Key decisions made in Phase 2 planning
+## Key decisions made
 
 These were deliberated and decided — do not revisit unless new data
 warrants it:
 
-- **Qwen3-Embedding-0.6B** over nomic-embed-text-v1.5 (longer context,
-  instruction-aware, stronger MTEB scores)
+### Phase 2 decisions (unchanged)
+- **Qwen3-Embedding-0.6B** over nomic-embed-text-v1.5
 - **ms-marco-MiniLM reranker** — Qwen3-Reranker-0.6B was incompatible
-  (generative LM, not sequence-classification)
-- **sentence-transformers backend** over fastembed/qwen3-embed (model
-  swapping flexibility)
-- **D2 prose-flush chunking** — 5 strategies benchmarked, D2 won on
-  distribution quality (p50=165w, only 11% under 50w)
-- **No truncation, ever** — chunks emitted at natural size, no
-  max_seq_length cap
-- **No persistent store in CI/CD** — fresh rebuild each deployment,
-  embedding cache for local dev only
-- **--keyword as flag** not separate namespace — semantic is default
-- **Tiered search output** — full content for short chunks, query-aware
-  snippet for long chunks (controlled context exposure per Manus post)
+- **sentence-transformers backend** over fastembed/qwen3-embed
+- **D2 prose-flush chunking** — 5 strategies benchmarked, D2 won
+- **No truncation, ever** — chunks emitted at natural size
 
-## Known limitations
+### Deployment hardening decisions (this session)
+- **Version-scoped cache dirs** — `embedding_cache/{version}/{model}/` prevents
+  collision between v9 and v10 caches
+- **Chunker hash (source code SHA-256)** — no manual versioning, auto-invalidates
+- **Doc source pinning** — `doc_pins.toml` with `.doc_ref` commit SHA tracking
+- **HTTP embedder for BOTH cache rebuild AND runtime queries** — if endpoint is
+  available, use it for everything (faster query embedding over LAN). CPU is
+  fallback for runtime queries only. Cache rebuild requires HTTP endpoint.
+- **Reranker stays local only** — ~15ms on CPU is fast enough, no HTTP needed
+- **No CPU cache rebuild** — maintainer must have HTTP endpoint to rebuild
+- **Git LFS for caches and doc sources** — regular git blobs accumulate too fast
+- **sentence-transformers becomes core dep** — every user needs it for CPU query
+  fallback (and reranking, which is always local)
+- **`--no-semantic` will be removed** — semantic search is always required;
+  server refuses to start without valid cache
 
-- 22 chunks over 1,000 words consume 26% of embedding time (~56s of 212s)
-- Query latency ~550ms exceeds 200ms target — dominated by model
-  inference overhead
-- Cross-reference resolution is 84% — multi-anchor headings in
-  doc_loader cause 16% unresolvable
-- No inter-guide cross-references (prose references not parseable)
-- `sentence-transformers` batch progress bar was broken (showed batches
-  not chunks) — replaced with per-chunk progress bar in REPORT_0030
+## What's next — immediate (0042–0044)
 
-## What's next
+Three instruction files remain to complete deployment hardening. Draft
+instructions were discussed in the previous planning session but only 0042
+should be written fresh (reading the current codebase state after 0041):
 
-See TOOL_ROADMAP.md for Phase 3 and Phase 4 items. Immediate priorities:
+### 0042 — Startup rewrite: cache-first architecture
+The big one. Rewires `server.py` startup:
+- Valid committed cache → load vectors, skip corpus embedding
+- Stale cache + HTTP endpoint available → rebuild via `HttpEmbedder`
+- Stale cache + no endpoint → hard error, refuse to start
+- **Query-time embedding:** use HTTP endpoint if available, fall back to
+  local `SentenceTransformerEmbedder` on CPU
+- **Reranking:** always local `SentenceTransformerReranker`
+- Move `sentence-transformers`/`torch`/`numpy` to core `[project] dependencies`
+- Remove `[semantic]` optional extras group
+- Remove `--no-semantic` CLI flag
 
-1. **End-to-end validation** — run a fresh test session with all Phase 2
-   improvements deployed together (tiered output, query-aware snippets,
-   cross-refs, grep enhancements). Collect JSONL logs and user feedback.
+### 0043 — Git LFS setup
+- `.gitattributes` for LFS tracking of `.npy`, `.json` (cache), and
+  `docs_cache/**` files
+- Update `.gitignore` to stop ignoring `docs_cache/`
+- Document LFS requirement in README/SETUP
+- Build initial caches with GPU, commit to git
 
-2. **Phase 3 candidates** (from user feedback and roadmap):
+### 0044 — Version isolation messaging
+- Harden `_INSTRUCTIONS` field: never mix v9/v10, label every fact with version
+- Audit metadata footer version accuracy (must come from queried index, not default)
+- Audit URL generation per version
+- Review tool docstring for inadvertent v9 promotion
+
+## What's next — after deployment hardening
+
+See TOOL_ROADMAP.md for Phase 3 and Phase 4 items. After 0042-0044:
+
+1. **End-to-end validation** — fresh test session with all improvements deployed.
+   Collect JSONL logs and user feedback.
+
+2. **Phase 3 candidates:**
    - TF-IDF keyword index (replace raw substring matching)
    - Related term suggestions
    - Multi-anchor fix in doc_loader (improve cross-ref resolution)
    - Langfuse observability (right timing: Stage 2 multi-user deployment)
 
-3. **Performance levers** (if needed):
-   - ONNX backend (~1.4-3× CPU speedup, one-line change)
-   - GPU fallback via ONNX execution providers
-   - Bake embeddings into Docker image at CI build time
+3. **Phase 4 candidates:**
+   - Auto-detect installed KiCad version
+   - Version comparison tool
+   - ONNX backend for CPU speedup
+
+## Known limitations
+
+- 22 chunks over 1,000 words consume 26% of embedding time (~56s of 212s)
+- Query latency ~550ms exceeds 200ms target — dominated by model
+  inference overhead (HTTP endpoint may help here)
+- Cross-reference resolution is 84% — multi-anchor headings cause 16% unresolvable
+- No inter-guide cross-references (prose references not parseable)
+- 3 pre-existing test failures in test_doc_loader.py (missing local doc clone)

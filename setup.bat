@@ -52,7 +52,15 @@ IF EXIST requirements.txt (
     echo requirements.txt not found, skipping.
 )
 
-REM 6. Install development requirements (including editable install of repo)
+REM 6. Install semantic search requirements (sentence-transformers, torch, numpy)
+IF EXIST requirements-semantic.txt (
+    pip install -r requirements-semantic.txt
+    echo Semantic search requirements installed.
+) ELSE (
+    echo requirements-semantic.txt not found, skipping.
+)
+
+REM 7. Install development requirements (including editable install of repo)
 IF EXIST requirements_dev.txt (
     pip install -r requirements_dev.txt
     echo Development requirements installed.
@@ -60,9 +68,9 @@ IF EXIST requirements_dev.txt (
     echo requirements_dev.txt not found, skipping.
 )
 
-REM 7. Add ipykernel user install for Jupyter support
+REM 8. Add ipykernel user install for Jupyter support
 python -m ipykernel install --user --name=kicad_mcp_server --display-name "KiCad MCP Server"
 
-REM 8. Done
+REM 9. Done
 echo Setup complete. Virtual environment is active.
 pause
