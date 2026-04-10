@@ -368,7 +368,7 @@ Type: kicad docs --help for subcommand details
 
         # Log to terminal
         if result_count == 0 and "error" in result.lower():
-            status = f"error: {result.split('\\n')[0]}"
+            status = f"error: {result.splitlines()[0]}"
         elif result_count == 0:
             status = "no results"
         else:

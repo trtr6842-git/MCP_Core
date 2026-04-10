@@ -50,6 +50,16 @@ Customize host and port with optional flags:
 python -m kicad_mcp.server --user ttyle --host 0.0.0.0 --port 8000
 ```
 
+### Force cache rebuild
+
+To discard the existing embedding cache and re-embed all documentation from scratch:
+
+```bash
+python -m kicad_mcp.server --user ttyle --rebuild-cache
+```
+
+This requires an HTTP embedding endpoint to be configured in `config/embedding_endpoints.toml`. Without one, the server will exit with an error. Use this after updating the documentation corpus or changing the embedding model.
+
 ## Development
 
 See `internal_docs/.claude/PROJECT_VISION.md` for project goals and architecture.
