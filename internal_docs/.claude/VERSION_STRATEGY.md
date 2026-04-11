@@ -118,3 +118,18 @@ The cache validates on five fields:
 
 All five must match for a cache hit. Any mismatch → cache miss → rebuild
 required (via HTTP embedding endpoint).
+
+## Versioning in the multi-source context
+
+Not all documentation sources are versioned. The kicad-doc source has
+version branches (9.0, 10.0); the KLC source has a single `master` branch
+(KLC version is independent of KiCad version). When the multi-source
+framework (see `MULTI_SOURCE_FRAMEWORK.md`) is implemented:
+
+- The `--version` flag applies only to versioned sources. For kicad-doc,
+  `--version 9` selects the 9.0 index. For unversioned sources like KLC,
+  the flag has no effect (there is only one version).
+- The metadata footer will indicate which source a result came from,
+  including version where applicable.
+- Cross-source search returns results from all sources regardless of
+  `--version` setting. Version filtering applies only to versioned sources.

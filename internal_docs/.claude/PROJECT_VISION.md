@@ -9,8 +9,8 @@ through a CLI-style command interface. The server exposes one MCP tool
 (`kicad(command: str)`) with a namespaced command structure. Claude
 composes commands using Unix-style syntax it already knows from training.
 
-The first command group is `docs` — official KiCad documentation access.
-The `kicad` namespace is left open for future command groups to be
+The first command group is `docs` — documentation access across multiple
+sources. The `kicad` namespace is left open for future command groups to be
 registered as they are developed.
 
 ## Why it matters
@@ -45,25 +45,29 @@ architecture.
 kicad docs search "pad properties" --guide pcbnew
 kicad docs read pcbnew/Board Setup | grep stackup
 kicad docs list eeschema --depth 2
+kicad docs read klc/F5.1
+kicad docs search "silkscreen" --guide klc
 ```
 
-The top-level namespace is `kicad`. The `docs` command group is the current
-scope of work. The namespace is open for future groups — they register into
-the same router and inherit the same infrastructure (parser, filters,
-presentation layer) without code changes to the framework.
+The top-level namespace is `kicad`. The `docs` command group navigates a
+unified virtual filesystem of documentation sources. The namespace is open
+for future groups — they register into the same router and inherit the same
+infrastructure (parser, filters, presentation layer) without code changes
+to the framework.
 
 ## Tool philosophy
 
 Let Claude interact with the server like a CLI. Navigation (`list`),
 reading (`read`), and search (`search`) are subcommands under `docs`.
-Results always include the KiCad version and a clickable URL to the
-official docs page. Search results include the exact `read` command so
-Claude can copy it directly. Pipe filters (`grep`, `head`, `tail`, `wc`)
-let Claude refine results in a single call instead of making multiple
-round trips.
+All documentation sources are mounted into a single path tree and navigated
+with the same commands. Results always include the source URL. Search results
+include the exact `read` command so Claude can copy it directly. Pipe filters
+(`grep`, `head`, `tail`, `wc`) let Claude refine results in a single call
+instead of making multiple round trips.
 
-Semantic search is the default. `--keyword` flag forces exact substring
-matching when needed.
+Semantic search is the default and spans all mounted sources. `--guide`
+narrows to a subtree. `--keyword` flag forces exact substring matching
+when needed.
 
 Log everything. The logs matter more than the tool design right now — a
 future analysis pass will tell us what commands engineers actually use and
@@ -82,7 +86,23 @@ how they compose them.
 - Currently serving KiCad 10.0 (default) and 9.0 (legacy comparison)
 - Future: detect version from user's installed KiCad
 
-## Doc source and fetching
+## Doc sources and the virtual filesystem
+
+### Unified path tree
+
+All documentation sources mount into a single path namespace navigated by
+the `docs` command group. This follows the Manus design principle: one
+namespace, one command interface, filesystem-like path navigation. Adding
+a source adds a mount point, not a command group.
+
+The primary source (kicad-doc) mounts at root — its guides (`pcbnew/`,
+`eeschema/`, etc.) are top-level paths. Additional sources mount at named
+prefixes (`klc/`, `wiki/`, etc.). This is analogous to how Linux mounts
+the root filesystem at `/` and additional filesystems at named paths.
+
+See `MULTI_SOURCE_FRAMEWORK.md` for the complete architecture.
+
+### Current source: kicad-doc
 
 Official KiCad docs from `gitlab.com/kicad/services/kicad-doc`. AsciiDoc
 source files read directly — no build step needed. Section structure extracted
@@ -101,16 +121,30 @@ Startup behavior (implemented in `doc_source.py`):
   `--depth 1` (shallow clone, ~15MB). Cache persists across restarts.
 - Legacy version always uses `docs_cache/` (ignores KICAD_DOC_PATH)
 
-**Deployment model:** Doc source trees and embedding caches are distributed
-via Git LFS. End users clone the repo and have everything needed to start.
-The maintainer updates docs by bumping the pin in `doc_pins.toml`, cloning,
-rebuilding embeddings, and committing the new files.
+### Planned source: KLC (Library Conventions)
 
-URL generation to official docs is deterministic:
+The KiCad Library Conventions at `https://klc.kicad.org` — source at
+`https://gitlab.com/kicad/libraries/klc`. Hugo static site with AsciiDoc
+content. ~70 rules across 4 categories (general, symbol, footprint, model).
+Mounts at `klc/` prefix. See `MULTI_SOURCE_FRAMEWORK.md` for details.
+
+### Deployment model
+
+Doc source trees and embedding caches are distributed via Git LFS. End
+users clone the repo and have everything needed to start. The maintainer
+updates docs by bumping the pin, cloning, rebuilding embeddings, and
+committing the new files.
+
+### URL generation
+
+Each source has its own URL builder. kicad-doc uses:
 `https://docs.kicad.org/{version}/en/{guide}/{guide}.html#{anchor}`
 - Explicit `[[anchors]]` used as-is
 - Auto-generated anchors: lowercase, underscores for spaces, no prefix
 - Verified against live site
+
+KLC uses:
+`https://klc.kicad.org/{category}/{group}/{rule_id}.html`
 
 ## Semantic search
 
@@ -130,6 +164,9 @@ does expensive precise ranking on the shortlist. For Altium-to-KiCad
 terminology mapping ("copper pour" → "filled zone"), a cross-encoder that
 sees query and document together dramatically outperforms embedding
 similarity alone.
+
+In the multi-source model, all sources' chunks feed into one VectorIndex.
+Search is cross-source by default; `--guide` narrows to a subtree.
 
 ### Model choices
 
@@ -180,24 +217,23 @@ Both protocols lazy-import their dependencies.
 
 ### Chunking strategy
 
-Navigation (list/read) stays heading-based — the AsciiDoc heading structure
+Navigation (list/read) stays heading-based — the section structure
 is the browsing interface. Search gets a separate `Chunker` protocol for
-retrieval units.
+retrieval units. Different sources use different chunkers.
 
-**D2 prose-flush** is the chosen strategy (implemented in `AsciiDocChunker`).
-It uses AsciiDoc block delimiters (`|===`, `----`, `....`, `====`, `****`,
-`++++`, `--`) as primary structural boundaries. Content is accumulated into
-a buffer and flushed only when new prose appears after a non-prose block.
-This keeps code examples and tables attached to the prose that introduces
-them, splitting only when the topic genuinely shifts.
+**D2 prose-flush** is the strategy for kicad-doc (implemented in
+`AsciiDocChunker`). It uses AsciiDoc block delimiters as primary structural
+boundaries. Content is accumulated into a buffer and flushed only when new
+prose appears after a non-prose block. This keeps code examples and tables
+attached to the prose that introduces them.
 
-The D2 strategy was selected after benchmarking 5 strategies. D2 produces
-the best distribution for embedding: ~681 chunks, p50 at 165 words, only
-11% under 50 words. Every chunk carries a `section_path` back-reference so
-search results link to navigable sections. No data is ever truncated or lost.
+For small-section sources like KLC, a simple "one section = one chunk"
+strategy is appropriate — rules are 100–500 words, already ideal embedding
+size.
 
 **Chunker protocol remains open.** `HeadingChunker`, `ParagraphChunker`,
-and `AsciiDocChunker` all implement the same `Chunker` protocol.
+and `AsciiDocChunker` all implement the same `Chunker` protocol. New sources
+add new chunkers when needed.
 
 **No truncation, ever.** Chunks are emitted at their natural size.
 
@@ -321,9 +357,28 @@ Streamable HTTP from day one.
 
 ## Future extension points (no work now, no architecture blockers)
 
-The `kicad` namespace is open for future command groups. The CLI
-infrastructure (chain parser, command router, built-in filters, presentation
-layer) is generic and serves any command group without modification.
+### Multi-source framework (planned, see MULTI_SOURCE_FRAMEWORK.md)
+
+The `docs` command group will evolve into a unified virtual filesystem
+navigator. Multiple documentation sources mount into a single path tree.
+The framework is designed so that adding a new source requires only a
+`Loader` (format-specific parsing) and a `UrlBuilder` (template string).
+Everything else — cloning, embedding, caching, search, CLI — is shared.
+
+First new source: **KLC** (KiCad Library Conventions) from
+`https://gitlab.com/kicad/libraries/klc`. Mounts at `klc/` prefix.
+
+Future sources under consideration:
+- KiCad Libraries GitLab Wiki (practical guidance, community tips)
+- KiCad file format specification (developer documentation)
+- Component datasheets / application notes (PDF extraction)
+
+### Other future extensions
+
+The `kicad` namespace is open for future command groups beyond `docs`.
+The CLI infrastructure (chain parser, command router, built-in filters,
+presentation layer) is generic and serves any command group without
+modification.
 
 - Auto-detect user's installed KiCad version → select matching doc index
 - Version comparison tool (show what changed between versions)

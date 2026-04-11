@@ -2,6 +2,10 @@
 
 > Structure, parsing rules, and URL generation for the official KiCad docs.
 > All information verified against the live repo and docs.kicad.org site.
+>
+> This document covers the **kicad-doc** source specifically. For the
+> multi-source framework and other sources (KLC, wiki, etc.), see
+> `MULTI_SOURCE_FRAMEWORK.md`.
 
 ## Source repository
 
@@ -59,6 +63,9 @@ pcb_calculator) are single files with no includes.
 
 Regex for detection: `^(={2,4})\s+(.+)$`
 
+**Note:** 146 level-4 (`=====`) headings exist but are currently unparsed.
+Extending to `={2,5}` is a Phase 3 Track B priority item.
+
 ## Anchor ID patterns
 
 ### Explicit anchors
@@ -110,6 +117,12 @@ https://docs.kicad.org/{version}/en/{guide}/{guide}.html#{anchor}
 
 Implementation in `src/kicad_mcp/url_builder.py`, tested with 4 verified
 cases in `tests/test_url_builder.py`.
+
+## Mount point in the virtual filesystem
+
+kicad-doc guides mount at root in the unified path tree — no prefix.
+Paths like `pcbnew/Board Setup` and `eeschema/Symbols` are top-level
+entries. This preserves backward compatibility with all existing commands.
 
 ## Content to strip when parsing
 

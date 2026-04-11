@@ -159,10 +159,49 @@ All items delivered:
   the largest reference sections (Object property reference, DRC checks, etc.)
 - Metadata footer always shows primary version regardless of queried version
 - LM Studio GGUF model emits tokenizer SEP token warnings
+- Only one doc source (kicad-doc) — KLC and other sources planned
 
-## Phase 3 — Search quality + navigation (informed by 0050 exploration)
+## Phase 3 — Multi-source framework + search quality
 
-### High priority (from user feedback + 0050 data)
+Phase 3 has two independent tracks that can be interleaved.
+
+### Track A: Multi-source framework
+
+See `MULTI_SOURCE_FRAMEWORK.md` for the complete architecture. The `docs`
+command group evolves into a unified virtual filesystem navigator. Multiple
+documentation sources mount into a single path tree. Adding a source
+requires only a Loader and UrlBuilder — everything else is shared.
+
+**Migration path (10 steps, first 4 are internal refactors):**
+
+| Step | Description | User-visible? |
+|------|-------------|---------------|
+| 1 | Define `Section` dataclass and `Loader` protocol | No |
+| 2 | Refactor `doc_loader.py` → `AsciiDocHeadingLoader` | No |
+| 3 | Refactor `DocIndex` to accept mounted sources | No |
+| 4 | Verify all existing tests pass | No |
+| 5 | Build `HugoAsciiDocLoader` for KLC | No |
+| 6 | Build `KlcUrlBuilder` | No |
+| 7 | Mount KLC at `klc/` — `kicad docs list klc` works | **Yes** |
+| 8 | Add KLC alias resolution (rule IDs as shortcuts) | **Yes** |
+| 9 | Add `sources.toml` declarative config | No |
+| 10 | Build KLC embedding cache | No |
+
+**First source to integrate:** KiCad Library Conventions (KLC) from
+`https://gitlab.com/kicad/libraries/klc`. ~70 rules, Hugo + AsciiDoc.
+Mounts at `klc/` prefix.
+
+**Key design decisions (made):**
+- Unified virtual filesystem, not separate command groups per source
+- kicad-doc guides mount at root (no prefix), new sources mount at named
+  prefixes (`klc/`, `wiki/`, etc.)
+- Per-source alias resolution (KLC rule IDs → full paths)
+- Per-source chunking strategy (D2 for kicad-doc, one-per-section for KLC)
+- Merged VectorIndex for cross-source search
+
+### Track B: Search quality + navigation (informed by 0050 exploration)
+
+#### High priority (from user feedback + 0050 data)
 
 - **Parse L4 (`=====`) headings** — extend `_HEADING_RE` from `={2,4}` to
   `={2,5}`. 146 unparsed headings, concentrated in the 12 sections that
@@ -180,7 +219,7 @@ All items delivered:
   section into one result. Assess after L4 parsing ships (may dissolve
   the problem for the worst offenders).
 
-### Medium priority
+#### Medium priority
 
 - **Multi-anchor fix in doc_loader** — track all `[[anchor-id]]` lines
   before a heading, not just the last one. Would improve cross-ref
@@ -190,15 +229,18 @@ All items delivered:
 - **Related term suggestions** — `docs search "pad"` suggests related terms
   like `["padstack", "courtyard", "SMD", "through-hole"]`.
 - **Guide hint in search footer** — when results span 3+ guides, append
-  `Tip: narrow with --guide <name>`.
+  `Tip: narrow with --guide <n>`.
 
-### Lower priority
+#### Lower priority
 
 - **Langfuse observability** — tracing, retrieval quality monitoring,
   query analysis at scale. Right timing: Stage 2 multi-user deployment.
 
 ## Phase 4 — Polish and future-proofing
 
+- **Additional doc sources** — KiCad Libraries Wiki, file format specs,
+  community guides. Each requires only a Loader + UrlBuilder once the
+  framework from Track A is in place.
 - **Version comparison** — accept version array, return diffs or side-by-side
 - **ONNX backend** — optional ONNX Runtime for ~1.4–3× CPU embedding
   speedup. One-line change (`backend="onnx"` in embedder constructor).
@@ -217,4 +259,5 @@ From DESIGN_INFLUENCES.md:
 - **stderr never suppressed** — exceptions and tracebacks reach Claude verbatim
 - **Consistent output** — version + metadata footer on every result
 - **Two-layer architecture** — lossless execution layer, shaped presentation layer
+- **Unified path namespace** — all doc sources mount into one filesystem tree
 - **Log everything** — command logs drive iteration, not upfront design
